@@ -6,11 +6,12 @@ from dateutil.relativedelta import relativedelta
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+from xlsxwriter.utility import xl_col_to_name
 
 # Configuración de la página
 st.set_page_config(page_title="Consignas - CRA", layout="wide")
 st.title("💎 CRA INT: Análisis Global de Consignas")
-st.markdown("Generación automatizada de inventarios y sugeridos para almacenes foráneos y consignas.")
+st.markdown("Generación automatizada de inventarios y requerimientos para almacenes foráneos y consignas.")
 
 # --- CONFIGURACIÓN GOOGLE DRIVE ---
 @st.cache_resource
@@ -120,7 +121,6 @@ def descargar_todas_las_ventas_12m():
                 engine = 'xlrd' if 'xls' in file_meta['name'] and 'xlsx' not in file_meta['name'] else 'openpyxl'
                 df_temp = pd.read_excel(content, engine=engine)
                 df_temp.columns = df_temp.columns.str.upper().str.strip()
-                # Filtrar solo columnas necesarias para ahorrar memoria
                 cols_utiles = [c for c in df_temp.columns if c in ['NP', 'DESCR', 'FECHA', 'ALMACEN', 'CANTIDAD']]
                 dfs.append(df_temp[cols_utiles])
             except Exception: pass
@@ -130,7 +130,7 @@ def descargar_todas_las_ventas_12m():
     df_global = pd.concat(dfs, ignore_index=True)
     df_global['FECHA'] = pd.to_datetime(df_global['FECHA'], dayfirst=True, errors='coerce')
     
-    # Filtrar estrictamente 12 meses
+    # Filtrar 12 meses
     mask = (df_global['FECHA'] >= fecha_inicio) & (df_global['FECHA'] < fecha_fin)
     df_global = df_global[mask].copy()
     
@@ -144,13 +144,13 @@ def descargar_todas_las_ventas_12m():
 ALMACENES_CUAUTI = ["ALM. BOÑAR", "ALM. FAST FOOD", "ALM. LIPU", "ALM. MYM", "ALM. UTEP"]
 ALMACENES_TULTI = ["ALM. ENLACES LOGISTICOS", "ALMACEN AFN", "BISONTE TEPOTZOTLAN", "CULVERT", "TDR", "TEISA", "TUMSA", "ZONTE"]
 ALMACENES_BAJIO = ["ALM. UTEP SAN LUIS", "BISONTE SLP"]
-TODOS_ALMACENES = ALMACENES_CUAUTI + ALMACENES_TULTI + ALMACENES_BAJIO
+TODOS_ALMACENES = sorted(ALMACENES_CUAUTI + ALMACENES_TULTI + ALMACENES_BAJIO) # Orden alfabético
 
 def obtener_color_pestana(almacen):
     alm = almacen.upper()
-    if alm in [x.upper() for x in ALMACENES_CUAUTI]: return '#4B8BBE' # Azul
-    if alm in [x.upper() for x in ALMACENES_TULTI]: return '#FF9999' # Rojo Claro
-    if alm in [x.upper() for x in ALMACENES_BAJIO]: return '#99FF99' # Verde Claro
+    if alm in [x.upper() for x in ALMACENES_CUAUTI]: return '#4B8BBE' # Azul (Cuauti)
+    if alm in [x.upper() for x in ALMACENES_TULTI]: return '#FF9999' # Rojo Claro (Tulti)
+    if alm in [x.upper() for x in ALMACENES_BAJIO]: return '#99FF99' # Verde Claro (Bajio)
     return '#FFFFFF'
 
 # --- GENERADOR DE EXCEL MULTIPESTAÑA ---
@@ -159,77 +159,137 @@ def crear_excel_consignas(df_ventas, df_inv):
     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
         workbook = writer.book
         
-        # Formatos
-        fmt_blue = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#10345C', 'font_color': 'white', 'border': 1})
-        fmt_gray = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#D3D3D3', 'font_color': 'black', 'border': 1})
-        fmt_white = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'border': 1})
-        cell_fmt = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'border_color': '#D3D3D3'})
+        # --- Formatos ---
+        fmt_blue = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#10345C', 'font_color': 'white', 'border': 1, 'text_wrap': True})
+        fmt_gray = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#D3D3D3', 'font_color': 'black', 'border': 1, 'text_wrap': True})
+        fmt_white = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'border': 1, 'text_wrap': True})
         
-        # 1. HOJA "CONSIGNAS" (Indice/Portada)
-        ws_cons = workbook.add_worksheet("CONSIGNAS")
-        ws_cons.set_tab_color('#D3D3D3') # Gris Claro
-        ws_cons.write("A1", "REPORTE GLOBAL DE CONSIGNAS", fmt_blue)
-        ws_cons.set_column('A:A', 40)
+        # Formato de celda general (Sin decimales)
+        cell_fmt = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'border_color': '#D3D3D3', 'num_format': '0'})
+        cell_fmt_text = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'border_color': '#D3D3D3'})
         
-        # 2. PROCESAR CADA ALMACÉN
+        # --- Pre-Procesamiento de Datos ---
+        datos_almacenes = {}
+        todas_partes = []
+
         for alm in TODOS_ALMACENES:
-            # Filtrar ventas del almacen
             df_v_alm = df_ventas[df_ventas['ALMACEN'] == alm.upper()]
             
-            if df_v_alm.empty:
-                # Si no hay ventas, pasamos al siguiente o creamos hoja vacia
-                resumen = pd.DataFrame(columns=['NP', 'DESCR', 'VENTA', 'HITS'])
-            else:
-                # Agrupar ventas (Venta Total y HITS)
-                resumen = df_v_alm.groupby('NP').agg(
+            resumen_ventas = pd.DataFrame()
+            if not df_v_alm.empty:
+                resumen_ventas = df_v_alm.groupby('NP').agg(
                     DESCR=('DESCR', 'first'),
                     VENTA=('CANTIDAD', 'sum'),
                     total_ev=('CANTIDAD', 'count'),
                     neg_ev=('CANTIDAD', lambda x: (x < 0).sum())
                 ).reset_index()
-                # HITS: Total eventos positivos y quitamos los negativos dobles
-                resumen['HITS'] = (resumen['total_ev'] - (resumen['neg_ev'] * 2)).clip(lower=0)
-            
-            # Cruzar con inventario para Existencia
+                resumen_ventas['HITS'] = (resumen_ventas['total_ev'] - (resumen_ventas['neg_ev'] * 2)).clip(lower=0)
+            else:
+                resumen_ventas = pd.DataFrame(columns=['NP', 'DESCR', 'VENTA', 'HITS'])
+
+            inv_exist = pd.DataFrame()
             if df_inv is not None and not df_inv.empty:
                 df_i_alm = df_inv[df_inv['ALMACEN'] == alm.upper()]
-                inv_exist = df_i_alm.groupby('NP')['EXISTENCIA'].sum().reset_index()
-                resumen = pd.merge(resumen, inv_exist, on='NP', how='left')
-                resumen['EXISTENCIA'] = resumen['EXISTENCIA'].fillna(0)
+                inv_exist = df_i_alm.groupby('NP').agg(EXISTENCIA=('EXISTENCIA', 'sum'), DESCR_INV=('DESCRIPCION', 'first')).reset_index()
             else:
-                resumen['EXISTENCIA'] = 0
-            
-            # Limpiar casos donde las ventas sean 0 y existencia 0 (Basura)
+                inv_exist = pd.DataFrame(columns=['NP', 'EXISTENCIA', 'DESCR_INV'])
+
+            # Unir ventas e inventario (Para que salgan también los que tienen inventario pero 0 ventas)
+            if not resumen_ventas.empty or not inv_exist.empty:
+                resumen = pd.merge(resumen_ventas, inv_exist, on='NP', how='outer')
+                resumen['VENTA'] = resumen['VENTA'].fillna(0)
+                resumen['HITS'] = resumen['HITS'].fillna(0)
+                resumen['EXISTENCIA'] = resumen['EXISTENCIA'].fillna(0)
+                if 'DESCR_INV' in resumen.columns and 'DESCR' in resumen.columns:
+                    resumen['DESCR'] = resumen['DESCR'].combine_first(resumen['DESCR_INV']).fillna('')
+                elif 'DESCR_INV' in resumen.columns:
+                    resumen['DESCR'] = resumen['DESCR_INV'].fillna('')
+                
+                # Filtrar solo piezas con algún movimiento o existencia
+                resumen = resumen[(resumen['VENTA'] != 0) | (resumen['HITS'] > 0) | (resumen['EXISTENCIA'] != 0)].reset_index(drop=True)
+            else:
+                resumen = pd.DataFrame(columns=['NP', 'DESCR', 'VENTA', 'HITS', 'EXISTENCIA'])
+                
+            datos_almacenes[alm] = resumen
             if not resumen.empty:
-                resumen = resumen[(resumen['VENTA'] != 0) | (resumen['HITS'] > 0)]
+                todas_partes.append(resumen[['NP', 'DESCR']])
+
+        # --- 1. CREAR HOJA "CONSIGNAS" ---
+        df_cons_base = pd.concat(todas_partes).drop_duplicates(subset=['NP']).reset_index(drop=True) if todas_partes else pd.DataFrame(columns=['NP', 'DESCR'])
+        
+        # Calcular Inventario Disponible CRA (General)
+        if df_inv is not None and not df_inv.empty:
+            df_inv_gral = df_inv[df_inv['ALMACEN'] == 'ALM. GENERAL']
+            inv_gral_agg = df_inv_gral.groupby('NP')['EXISTENCIA'].sum().reset_index()
+            df_cons_base = pd.merge(df_cons_base, inv_gral_agg, on='NP', how='left')
+            df_cons_base['EXISTENCIA'] = df_cons_base['EXISTENCIA'].fillna(0)
+        else:
+            df_cons_base['EXISTENCIA'] = 0
+
+        ws_cons = workbook.add_worksheet("CONSIGNAS")
+        ws_cons.set_tab_color('#D3D3D3')
+        ws_cons.freeze_panes(2, 0)
+        
+        # Filtro Global
+        last_col_cons = 4 + len(TODOS_ALMACENES)
+        if not df_cons_base.empty:
+            ws_cons.autofilter(1, 0, len(df_cons_base) + 1, last_col_cons)
+
+        # Fila 0 (Encabezado Superior Merged)
+        ws_cons.merge_range(0, 0, 1, 0, "N° DE PARTE", fmt_blue)
+        ws_cons.merge_range(0, 1, 1, 1, "DESCR", fmt_blue)
+        ws_cons.merge_range(0, 2, 1, 2, "TRASPASO TOTAL", fmt_blue)
+        ws_cons.merge_range(0, 3, 1, 3, "INV. DISPONIBLE CRA", fmt_blue)
+        ws_cons.merge_range(0, 4, 1, 4, "FALTANTE CRA", fmt_blue)
+        ws_cons.merge_range(0, 5, 0, last_col_cons, "TRASPASO / REQUERIDO POR CONSIGNA", fmt_blue)
+
+        # Fila 1 (Nombres de Almacenes)
+        for i, alm in enumerate(TODOS_ALMACENES):
+            ws_cons.write(1, 5 + i, alm, fmt_gray)
+
+        # Anchos
+        ws_cons.set_column('A:A', 20, cell_fmt_text)
+        ws_cons.set_column('B:B', 45, cell_fmt_text)
+        ws_cons.set_column('C:E', 18, cell_fmt)
+        ws_cons.set_column(5, last_col_cons, 16, cell_fmt)
+
+        # Fórmulas de la Hoja CONSIGNAS
+        last_col_letter = xl_col_to_name(last_col_cons)
+        for i in range(len(df_cons_base)):
+            row = 2 + i
+            ex_row = row + 1
+            ws_cons.write(row, 0, df_cons_base.loc[i, 'NP'], cell_fmt_text)
+            ws_cons.write(row, 1, df_cons_base.loc[i, 'DESCR'], cell_fmt_text)
             
-            # Preparar DataFrame de la Hoja
-            df_hoja = pd.DataFrame()
-            df_hoja['N° DE PARTE'] = resumen['NP'] if not resumen.empty else []
-            df_hoja['DESCR'] = resumen['DESCR'] if not resumen.empty else []
-            df_hoja['VENTA'] = resumen['VENTA'] if not resumen.empty else []
-            df_hoja['HITS'] = resumen['HITS'] if not resumen.empty else []
-            df_hoja['DEMANDA'] = ''
-            df_hoja['PROMEDIO (12)'] = ''
-            df_hoja['MIN (1)'] = ''
-            df_hoja['MAX (3)'] = ''
-            df_hoja['INVENTARIO EXISTENCIA'] = resumen['EXISTENCIA'] if not resumen.empty else []
-            df_hoja['VENTA ACTUAL'] = ''
-            df_hoja['EXCESO INVENTARIO'] = ''
-            df_hoja['TRASPASO REQUERIDO'] = ''
-            df_hoja['COMENTARIOS'] = ''
+            # C: TRASPASO TOTAL (Suma de la fila de almacenes F a fin)
+            ws_cons.write_formula(row, 2, f"=SUM(F{ex_row}:{last_col_letter}{ex_row})", cell_fmt)
+            # D: INV DISPONIBLE CRA
+            ws_cons.write(row, 3, df_cons_base.loc[i, 'EXISTENCIA'], cell_fmt)
+            # E: FALTANTE CRA (C+D)
+            ws_cons.write_formula(row, 4, f"=C{ex_row}+D{ex_row}", cell_fmt)
             
-            sheet_name = alm[:31] # Excel limit
-            df_hoja.to_excel(writer, sheet_name=sheet_name, index=False)
-            ws = writer.sheets[sheet_name]
-            
-            # Colores de la pestaña
+            # F en adelante: Sumar.Si en la hoja de cada almacén (Columna L es la 12, que es TRASPASO REQUERIDO)
+            for j, alm in enumerate(TODOS_ALMACENES):
+                sheet_name_alm = alm[:31]
+                formula = f"=SUMIF('{sheet_name_alm}'!A:A, $A{ex_row}, '{sheet_name_alm}'!L:L)"
+                ws_cons.write_formula(row, 5 + j, formula, cell_fmt)
+
+        # --- 2. CREAR HOJAS INDIVIDUALES DE ALMACENES ---
+        for alm in TODOS_ALMACENES:
+            df_hoja = datos_almacenes[alm]
+            sheet_name = alm[:31]
+            ws = workbook.add_worksheet(sheet_name)
             ws.set_tab_color(obtener_color_pestana(alm))
             ws.freeze_panes(1, 0)
             
-            # Escribir Encabezados con colores
-            columnas = df_hoja.columns.tolist()
-            for col_num, col_name in enumerate(columnas):
+            if not df_hoja.empty:
+                ws.autofilter(0, 0, len(df_hoja), 12)
+            else:
+                ws.autofilter(0, 0, 0, 12)
+                
+            encabezados = ['N° DE PARTE', 'DESCR', 'VENTA', 'HITS', 'DEMANDA', 'PROMEDIO (12)', 'MIN (1)', 'MAX (3)', 'INVENTARIO EXISTENCIA', 'VENTA ACTUAL', 'EXCESO INVENTARIO', 'TRASPASO REQUERIDO', 'COMENTARIOS']
+            
+            for col_num, col_name in enumerate(encabezados):
                 if col_name in ['N° DE PARTE', 'DESCR', 'VENTA', 'HITS']:
                     ws.write(0, col_num, col_name, fmt_blue)
                 elif col_name == 'COMENTARIOS':
@@ -237,34 +297,40 @@ def crear_excel_consignas(df_ventas, df_inv):
                 else:
                     ws.write(0, col_num, col_name, fmt_gray)
             
-            # Anchos de columna
-            ws.set_column('A:A', 20, cell_fmt)
-            ws.set_column('B:B', 45, cell_fmt)
+            ws.set_column('A:A', 20, cell_fmt_text)
+            ws.set_column('B:B', 45, cell_fmt_text)
             ws.set_column('C:L', 15, cell_fmt)
-            ws.set_column('M:M', 30, cell_fmt) # Comentarios ancho
+            ws.set_column('M:M', 30, cell_fmt_text)
             
-            # Fórmulas de Excel
-            # A=0, B=1, C(VENTA)=2, D(HITS)=3, E(DEM)=4, F(PROM)=5, G(MIN)=6, H(MAX)=7, I(INV)=8, J(VTA ACT)=9, K(EXC)=10, L(TRASP)=11
+            # Fórmulas Individuales
             start_row = 1
             for i in range(len(df_hoja)):
                 row = start_row + i
                 ex_row = row + 1
                 
-                # E: DEMANDA -> Alta (>12), Media (6 a 12), Baja (<6)
-                f_dem = f'=IF(D{ex_row}>12,"ALTA",IF(D{ex_row}>=6,"MEDIA","BAJA"))'
-                ws.write_formula(row, 4, f_dem, cell_fmt)
+                ws.write(row, 0, df_hoja.loc[i, 'NP'], cell_fmt_text)
+                ws.write(row, 1, df_hoja.loc[i, 'DESCR'], cell_fmt_text)
+                ws.write(row, 2, df_hoja.loc[i, 'VENTA'], cell_fmt)
+                ws.write(row, 3, df_hoja.loc[i, 'HITS'], cell_fmt)
                 
-                # F: PROMEDIO (12) -> Venta / 12
+                # E: DEMANDA -> Alta (>12), Media (6 a 12), Baja (<6)
+                f_dem = f'=IF(D{ex_row}>12,"ALTA",IF(AND(D{ex_row}>=6,D{ex_row}<=12),"MEDIA","BAJA"))'
+                ws.write_formula(row, 4, f_dem, cell_fmt_text)
+                
+                # F: PROMEDIO (12)
                 f_prom = f'=IFERROR(C{ex_row}/12, 0)'
                 ws.write_formula(row, 5, f_prom, cell_fmt)
                 
-                # G: MIN (1) -> Promedio * 1
+                # G: MIN (1)
                 f_min = f'=F{ex_row}*1'
                 ws.write_formula(row, 6, f_min, cell_fmt)
                 
-                # H: MAX (3) -> Promedio * 3
+                # H: MAX (3)
                 f_max = f'=F{ex_row}*3'
                 ws.write_formula(row, 7, f_max, cell_fmt)
+                
+                # I: INV EXISTENCIA
+                ws.write(row, 8, df_hoja.loc[i, 'EXISTENCIA'], cell_fmt)
                 
                 # J: VENTA ACTUAL -> Inventario / Promedio
                 f_vtact = f'=IFERROR(I{ex_row}/F{ex_row}, 0)'
@@ -272,28 +338,29 @@ def crear_excel_consignas(df_ventas, df_inv):
                 
                 # K: EXCESO INVENTARIO -> SI Inventario > Max
                 f_exc = f'=IF(I{ex_row}>H{ex_row},"SI","NO")'
-                ws.write_formula(row, 10, f_exc, cell_fmt)
+                ws.write_formula(row, 10, f_exc, cell_fmt_text)
                 
-                # L: TRASPASO REQUERIDO -> Inventario - Max
+                # L: TRASPASO REQUERIDO -> Inventario - Max (I3 - H3)
                 f_trasp = f'=I{ex_row}-H{ex_row}'
                 ws.write_formula(row, 11, f_trasp, cell_fmt)
+                
+                # M: COMENTARIOS
+                ws.write(row, 12, '', cell_fmt_text)
 
     buffer.seek(0)
     return buffer
 
 # --- INTERFAZ GRAFICA STREAMLIT ---
-st.info("💡 Haz clic en el botón para que el sistema descargue todas las bases, filtre las fechas dinámicas y genere el Excel de 16 pestañas.")
+st.info("💡 Haz clic en el botón para que el sistema descargue todas las bases, filtre las fechas dinámicas y genere el Excel de Consignas con Múltiples Pestañas.")
 
 if st.button("🚀 Generar Reporte de Consignas"):
     with st.spinner("Iniciando motor de descarga (Esto puede tomar un par de minutos)..."):
         
-        # 1. Cargar Inventario General
         df_inv = cargar_inventario_maestro()
         if df_inv is None:
             st.error("No se pudo leer el archivo INVENTARIO_CRA de Drive.")
             st.stop()
             
-        # 2. Cargar TODAS las ventas de los últimos 12 meses
         df_ventas, f_inicio, f_fin = descargar_todas_las_ventas_12m()
         if df_ventas is None:
             st.error("No se encontraron registros de ventas en Master Ventas.")
@@ -301,11 +368,9 @@ if st.button("🚀 Generar Reporte de Consignas"):
             
         st.success(f"✅ Bases descargadas. Analizando periodo cerrado: **{f_inicio.strftime('%b %Y')} a { (f_fin - relativedelta(days=1)).strftime('%b %Y')}**")
         
-        # 3. Generar el MEGA EXCEL
-        with st.spinner("Procesando almacenes, calculando hits, promedios y coloreando pestañas..."):
+        with st.spinner("Procesando almacenes, calculando fórmulas cruzadas y aplicando diseño corporativo..."):
             buffer_excel = crear_excel_consignas(df_ventas, df_inv)
             
-        # 4. Subir a Drive
         with st.spinner("☁️ Subiendo archivo final a Google Drive..."):
             fecha_str = datetime.datetime.now().strftime("%d_%m_%Y")
             name_file = f"Analisis_Consignas_{fecha_str}.xlsx"
