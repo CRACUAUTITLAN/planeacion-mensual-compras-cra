@@ -130,7 +130,7 @@ def descargar_todas_las_ventas_12m():
     df_global = pd.concat(dfs, ignore_index=True)
     df_global['FECHA'] = pd.to_datetime(df_global['FECHA'], dayfirst=True, errors='coerce')
     
-    # Filtrar 12 meses
+    # Filtrar 12 meses exactos
     mask = (df_global['FECHA'] >= fecha_inicio) & (df_global['FECHA'] < fecha_fin)
     df_global = df_global[mask].copy()
     
@@ -144,7 +144,7 @@ def descargar_todas_las_ventas_12m():
 ALMACENES_CUAUTI = ["ALM. BOÑAR", "ALM. FAST FOOD", "ALM. LIPU", "ALM. MYM", "ALM. UTEP"]
 ALMACENES_TULTI = ["ALM. ENLACES LOGISTICOS", "ALMACEN AFN", "BISONTE TEPOTZOTLAN", "CULVERT", "TDR", "TEISA", "TUMSA", "ZONTE"]
 ALMACENES_BAJIO = ["ALM. UTEP SAN LUIS", "BISONTE SLP"]
-TODOS_ALMACENES = sorted(ALMACENES_CUAUTI + ALMACENES_TULTI + ALMACENES_BAJIO) # Orden alfabético
+TODOS_ALMACENES = sorted(ALMACENES_CUAUTI + ALMACENES_TULTI + ALMACENES_BAJIO)
 
 def obtener_color_pestana(almacen):
     alm = almacen.upper()
@@ -159,12 +159,12 @@ def crear_excel_consignas(df_ventas, df_inv):
     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
         workbook = writer.book
         
-        # --- Formatos ---
+        # --- Formatos (Con ajuste de texto y sin decimales) ---
         fmt_blue = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#10345C', 'font_color': 'white', 'border': 1, 'text_wrap': True})
         fmt_gray = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#D3D3D3', 'font_color': 'black', 'border': 1, 'text_wrap': True})
         fmt_white = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'border': 1, 'text_wrap': True})
         
-        # Formato de celda general (Sin decimales)
+        # Formato de celda general (Sin decimales '0')
         cell_fmt = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'border_color': '#D3D3D3', 'num_format': '0'})
         cell_fmt_text = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'border_color': '#D3D3D3'})
         
@@ -194,7 +194,6 @@ def crear_excel_consignas(df_ventas, df_inv):
             else:
                 inv_exist = pd.DataFrame(columns=['NP', 'EXISTENCIA', 'DESCR_INV'])
 
-            # Unir ventas e inventario (Para que salgan también los que tienen inventario pero 0 ventas)
             if not resumen_ventas.empty or not inv_exist.empty:
                 resumen = pd.merge(resumen_ventas, inv_exist, on='NP', how='outer')
                 resumen['VENTA'] = resumen['VENTA'].fillna(0)
@@ -205,7 +204,6 @@ def crear_excel_consignas(df_ventas, df_inv):
                 elif 'DESCR_INV' in resumen.columns:
                     resumen['DESCR'] = resumen['DESCR_INV'].fillna('')
                 
-                # Filtrar solo piezas con algún movimiento o existencia
                 resumen = resumen[(resumen['VENTA'] != 0) | (resumen['HITS'] > 0) | (resumen['EXISTENCIA'] != 0)].reset_index(drop=True)
             else:
                 resumen = pd.DataFrame(columns=['NP', 'DESCR', 'VENTA', 'HITS', 'EXISTENCIA'])
@@ -217,7 +215,6 @@ def crear_excel_consignas(df_ventas, df_inv):
         # --- 1. CREAR HOJA "CONSIGNAS" ---
         df_cons_base = pd.concat(todas_partes).drop_duplicates(subset=['NP']).reset_index(drop=True) if todas_partes else pd.DataFrame(columns=['NP', 'DESCR'])
         
-        # Calcular Inventario Disponible CRA (General)
         if df_inv is not None and not df_inv.empty:
             df_inv_gral = df_inv[df_inv['ALMACEN'] == 'ALM. GENERAL']
             inv_gral_agg = df_inv_gral.groupby('NP')['EXISTENCIA'].sum().reset_index()
@@ -230,20 +227,23 @@ def crear_excel_consignas(df_ventas, df_inv):
         ws_cons.set_tab_color('#D3D3D3')
         ws_cons.freeze_panes(2, 0)
         
-        # Filtro Global
         last_col_cons = 4 + len(TODOS_ALMACENES)
         if not df_cons_base.empty:
             ws_cons.autofilter(1, 0, len(df_cons_base) + 1, last_col_cons)
 
-        # Fila 0 (Encabezado Superior Merged)
-        ws_cons.merge_range(0, 0, 1, 0, "N° DE PARTE", fmt_blue)
-        ws_cons.merge_range(0, 1, 1, 1, "DESCR", fmt_blue)
-        ws_cons.merge_range(0, 2, 1, 2, "TRASPASO TOTAL", fmt_blue)
-        ws_cons.merge_range(0, 3, 1, 3, "INV. DISPONIBLE CRA", fmt_blue)
-        ws_cons.merge_range(0, 4, 1, 4, "FALTANTE CRA", fmt_blue)
+        # -- ENCABEZADOS (Corregidos a la Fila 2) --
+        # Fila 0 (Fondo azul para columnas A-E, y Titulo para Almacenes F-end)
+        for c in range(5):
+            ws_cons.write(0, c, "", fmt_blue)
         ws_cons.merge_range(0, 5, 0, last_col_cons, "TRASPASO / REQUERIDO POR CONSIGNA", fmt_blue)
 
-        # Fila 1 (Nombres de Almacenes)
+        # Fila 1 (Nombres exactos conviviendo con los filtros)
+        ws_cons.write(1, 0, "N° DE PARTE", fmt_blue)
+        ws_cons.write(1, 1, "DESCR", fmt_blue)
+        ws_cons.write(1, 2, "TRASPASO TOTAL", fmt_blue)
+        ws_cons.write(1, 3, "INV. DISPONIBLE CRA", fmt_blue)
+        ws_cons.write(1, 4, "FALTANTE CRA", fmt_blue)
+
         for i, alm in enumerate(TODOS_ALMACENES):
             ws_cons.write(1, 5 + i, alm, fmt_gray)
 
@@ -261,14 +261,10 @@ def crear_excel_consignas(df_ventas, df_inv):
             ws_cons.write(row, 0, df_cons_base.loc[i, 'NP'], cell_fmt_text)
             ws_cons.write(row, 1, df_cons_base.loc[i, 'DESCR'], cell_fmt_text)
             
-            # C: TRASPASO TOTAL (Suma de la fila de almacenes F a fin)
             ws_cons.write_formula(row, 2, f"=SUM(F{ex_row}:{last_col_letter}{ex_row})", cell_fmt)
-            # D: INV DISPONIBLE CRA
             ws_cons.write(row, 3, df_cons_base.loc[i, 'EXISTENCIA'], cell_fmt)
-            # E: FALTANTE CRA (C+D)
             ws_cons.write_formula(row, 4, f"=C{ex_row}+D{ex_row}", cell_fmt)
             
-            # F en adelante: Sumar.Si en la hoja de cada almacén (Columna L es la 12, que es TRASPASO REQUERIDO)
             for j, alm in enumerate(TODOS_ALMACENES):
                 sheet_name_alm = alm[:31]
                 formula = f"=SUMIF('{sheet_name_alm}'!A:A, $A{ex_row}, '{sheet_name_alm}'!L:L)"
@@ -302,7 +298,6 @@ def crear_excel_consignas(df_ventas, df_inv):
             ws.set_column('C:L', 15, cell_fmt)
             ws.set_column('M:M', 30, cell_fmt_text)
             
-            # Fórmulas Individuales
             start_row = 1
             for i in range(len(df_hoja)):
                 row = start_row + i
@@ -313,38 +308,29 @@ def crear_excel_consignas(df_ventas, df_inv):
                 ws.write(row, 2, df_hoja.loc[i, 'VENTA'], cell_fmt)
                 ws.write(row, 3, df_hoja.loc[i, 'HITS'], cell_fmt)
                 
-                # E: DEMANDA -> Alta (>12), Media (6 a 12), Baja (<6)
                 f_dem = f'=IF(D{ex_row}>12,"ALTA",IF(AND(D{ex_row}>=6,D{ex_row}<=12),"MEDIA","BAJA"))'
                 ws.write_formula(row, 4, f_dem, cell_fmt_text)
                 
-                # F: PROMEDIO (12)
                 f_prom = f'=IFERROR(C{ex_row}/12, 0)'
                 ws.write_formula(row, 5, f_prom, cell_fmt)
                 
-                # G: MIN (1)
                 f_min = f'=F{ex_row}*1'
                 ws.write_formula(row, 6, f_min, cell_fmt)
                 
-                # H: MAX (3)
                 f_max = f'=F{ex_row}*3'
                 ws.write_formula(row, 7, f_max, cell_fmt)
                 
-                # I: INV EXISTENCIA
                 ws.write(row, 8, df_hoja.loc[i, 'EXISTENCIA'], cell_fmt)
                 
-                # J: VENTA ACTUAL -> Inventario / Promedio
                 f_vtact = f'=IFERROR(I{ex_row}/F{ex_row}, 0)'
                 ws.write_formula(row, 9, f_vtact, cell_fmt)
                 
-                # K: EXCESO INVENTARIO -> SI Inventario > Max
                 f_exc = f'=IF(I{ex_row}>H{ex_row},"SI","NO")'
                 ws.write_formula(row, 10, f_exc, cell_fmt_text)
                 
-                # L: TRASPASO REQUERIDO -> Inventario - Max (I3 - H3)
                 f_trasp = f'=I{ex_row}-H{ex_row}'
                 ws.write_formula(row, 11, f_trasp, cell_fmt)
                 
-                # M: COMENTARIOS
                 ws.write(row, 12, '', cell_fmt_text)
 
     buffer.seek(0)
