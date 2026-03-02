@@ -2,15 +2,15 @@ import streamlit as st
 import pandas as pd
 import io
 import datetime
-import math
 from dateutil.relativedelta import relativedelta
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 # Configuración de la página
-st.set_page_config(page_title="Planeación Mensual - CRA", layout="wide")
-st.title("💎 CRA INT: Planeación Mensual de Compras")
+st.set_page_config(page_title="Consignas - CRA", layout="wide")
+st.title("💎 CRA INT: Análisis Global de Consignas")
+st.markdown("Generación automatizada de inventarios y sugeridos para almacenes foráneos y consignas.")
 
 # --- CONFIGURACIÓN GOOGLE DRIVE ---
 @st.cache_resource
@@ -70,7 +70,7 @@ def subir_excel_a_drive(buffer, nombre_archivo):
         return archivo.get('webViewLink')
     except Exception: return None
 
-# --- CARGA AUTOMÁTICA DEL INVENTARIO MAESTRO ---
+# --- CARGA INVENTARIO MAESTRO ---
 @st.cache_data(ttl=3600)
 def cargar_inventario_maestro():
     if not INVENTORY_FOLDER_ID: return None
@@ -85,37 +85,12 @@ def cargar_inventario_maestro():
             df_inv = pd.read_excel(content, engine=engine)
             df_inv.columns = df_inv.columns.str.upper().str.strip()
             df_inv['NP'] = df_inv['NP'].astype(str).str.strip()
-            df_inv['ALMACEN'] = df_inv['ALMACEN'].astype(str).str.strip()
-            df_inv['SUCURSAL'] = df_inv['SUCURSAL'].astype(str).str.strip()
+            df_inv['ALMACEN'] = df_inv['ALMACEN'].astype(str).str.strip().str.upper()
             return df_inv
         except Exception: return None
     return None
 
-# --- REGLAS DE NEGOCIO: ALMACÉN DE APOYO ---
-def determinar_apoyo(suc_local, alm_local):
-    """
-    Define automáticamente contra qué almacén se va a comparar (Apoyo).
-    Retorna: (sucursal_apoyo, almacen_apoyo)
-    """
-    alm = str(alm_local).upper().strip()
-    suc = str(suc_local).upper().strip()
-    
-    if "UTEP" in alm:
-        return "CUAUTITLAN", "ALM. GENERAL"
-    elif "BISONTE" in alm:
-        return "TULTITLAN", "ALM. GENERAL"
-    elif "GENERAL" in alm:
-        if suc == "CUAUTITLAN":
-            return "TULTITLAN", "ALM. GENERAL"
-        elif suc == "TULTITLAN":
-            return "CUAUTITLAN", "ALM. GENERAL"
-        else:
-            return "CUAUTITLAN", "ALM. GENERAL" # Respaldo
-    else:
-        # Para almacenes secundarios normales (ej. BOÑAR), comparan contra su propio General
-        return suc, "ALM. GENERAL"
-
-# --- LÓGICA DE VENTAS HISTÓRICAS ---
+# --- EXTRACCIÓN MASIVA DE VENTAS ---
 def buscar_archivos_ventas(agencia, anios):
     archivos_encontrados = []
     if not MASTER_SALES_ID: return []
@@ -125,47 +100,19 @@ def buscar_archivos_ventas(agencia, anios):
         archivos_encontrados.extend(results.get('files', []))
     return archivos_encontrados
 
-def clasificar_movimiento(row):
-    m10, v12 = row['meses_distintos_10m'], row['ventas_meses_11_y_12']
-    if m10 >= 6: return 'ALTO MOVIMIENTO'
-    if m10 >= 3: return 'MEDIO MOVIMIENTO'
-    if m10 >= 1: return 'BAJO MOVIMIENTO'
-    if v12 > 0: return 'RIESGO'
-    return 'OBSOLETO'
-
-def procesar_transito(archivo):
-    try:
-        df = pd.read_excel(archivo)
-        df.columns = df.columns.str.strip().str.upper()
-        if "N° PARTE" in df.columns: df.rename(columns={"N° PARTE": "NP"}, inplace=True)
-        if "TRANSITO" not in df.columns: df["TRANSITO"] = 0
-        df["NP"] = df["NP"].astype(str).str.strip()
-        df["TRANSITO"] = pd.to_numeric(df["TRANSITO"], errors='coerce').fillna(0)
-        return df.groupby("NP", as_index=False)["TRANSITO"].sum()
-    except Exception: return pd.DataFrame(columns=["NP", "TRANSITO"])
-
-def procesar_traspasos(archivo, filtro):
-    try:
-        engine = 'xlrd' if archivo.name.endswith('.xls') else 'openpyxl'
-        df = pd.read_excel(archivo, header=None, engine=engine)
-        df = df[df[0].astype(str).str.strip() == filtro].copy()
-        if df.empty: return pd.DataFrame(columns=["NP", "CANTIDAD_TRASPASO"])
-        df = df[[2, 4]].copy()
-        df.columns = ["NP", "CANTIDAD_TRASPASO"]
-        df["NP"] = df["NP"].astype(str).str.strip()
-        df["CANTIDAD_TRASPASO"] = pd.to_numeric(df["CANTIDAD_TRASPASO"], errors='coerce').fillna(0).abs()
-        return df.groupby("NP", as_index=False)["CANTIDAD_TRASPASO"].sum()
-    except Exception: return pd.DataFrame(columns=["NP", "CANTIDAD_TRASPASO"])
-
-def extraer_metricas_ventas(sucursal, almacen, df_inventario_filtrado, bar_obj, progress_start, progress_end):
+@st.cache_data(ttl=3600)
+def descargar_todas_las_ventas_12m():
     hoy = datetime.datetime.now()
-    fecha_inicio_12m = hoy - relativedelta(months=12)
-    fecha_inicio_10m = hoy - relativedelta(months=10)
-    anios_drive = list(set([fecha_inicio_12m.year, hoy.year]))
+    fecha_fin = hoy.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    fecha_inicio = fecha_fin - relativedelta(years=1)
+    anios_drive = list(set([fecha_inicio.year, fecha_fin.year]))
     
-    files_metadata = buscar_archivos_ventas(sucursal.upper(), anios_drive)
+    sucursales = ["CUAUTITLAN", "TULTITLAN", "BAJIO"]
+    files_metadata = []
+    for suc in sucursales:
+        files_metadata.extend(buscar_archivos_ventas(suc, anios_drive))
+        
     dfs = []
-    
     for i, file_meta in enumerate(files_metadata):
         content = descargar_archivo_drive(file_meta['id'])
         if content:
@@ -173,243 +120,198 @@ def extraer_metricas_ventas(sucursal, almacen, df_inventario_filtrado, bar_obj, 
                 engine = 'xlrd' if 'xls' in file_meta['name'] and 'xlsx' not in file_meta['name'] else 'openpyxl'
                 df_temp = pd.read_excel(content, engine=engine)
                 df_temp.columns = df_temp.columns.str.upper().str.strip()
-                dfs.append(df_temp)
+                # Filtrar solo columnas necesarias para ahorrar memoria
+                cols_utiles = [c for c in df_temp.columns if c in ['NP', 'DESCR', 'FECHA', 'ALMACEN', 'CANTIDAD']]
+                dfs.append(df_temp[cols_utiles])
             except Exception: pass
-        current_prog = progress_start + (progress_end - progress_start) * ((i + 1) / max(len(files_metadata), 1))
-        bar_obj.progress(int(current_prog), text=f"Consultando ventas de {sucursal}...")
             
-    if not dfs: 
-        df_vacio = df_inventario_filtrado[['NP']].drop_duplicates().copy()
-        df_vacio[['HITS', 'CONSUMO MENSUAL', 'meses_distintos_10m', 'ventas_meses_11_y_12']] = 0
-        return df_vacio
+    if not dfs: return None, fecha_inicio, fecha_fin
     
-    df_total = pd.concat(dfs, ignore_index=True)
-    if 'ALMACEN' in df_total.columns:
-        df_total['ALMACEN'] = df_total['ALMACEN'].astype(str).str.strip()
-        df_total = df_total[df_total['ALMACEN'] == almacen]
+    df_global = pd.concat(dfs, ignore_index=True)
+    df_global['FECHA'] = pd.to_datetime(df_global['FECHA'], dayfirst=True, errors='coerce')
+    
+    # Filtrar estrictamente 12 meses
+    mask = (df_global['FECHA'] >= fecha_inicio) & (df_global['FECHA'] < fecha_fin)
+    df_global = df_global[mask].copy()
+    
+    df_global['NP'] = df_global['NP'].astype(str).str.strip()
+    df_global['ALMACEN'] = df_global['ALMACEN'].astype(str).str.strip().str.upper()
+    df_global['CANTIDAD'] = pd.to_numeric(df_global['CANTIDAD'], errors='coerce').fillna(0)
+    
+    return df_global, fecha_inicio, fecha_fin
+
+# --- LISTADOS Y COLORES POR ZONA ---
+ALMACENES_CUAUTI = ["ALM. BOÑAR", "ALM. FAST FOOD", "ALM. LIPU", "ALM. MYM", "ALM. UTEP"]
+ALMACENES_TULTI = ["ALM. ENLACES LOGISTICOS", "ALMACEN AFN", "BISONTE TEPOTZOTLAN", "CULVERT", "TDR", "TEISA", "TUMSA", "ZONTE"]
+ALMACENES_BAJIO = ["ALM. UTEP SAN LUIS", "BISONTE SLP"]
+TODOS_ALMACENES = ALMACENES_CUAUTI + ALMACENES_TULTI + ALMACENES_BAJIO
+
+def obtener_color_pestana(almacen):
+    alm = almacen.upper()
+    if alm in [x.upper() for x in ALMACENES_CUAUTI]: return '#4B8BBE' # Azul
+    if alm in [x.upper() for x in ALMACENES_TULTI]: return '#FF9999' # Rojo Claro
+    if alm in [x.upper() for x in ALMACENES_BAJIO]: return '#99FF99' # Verde Claro
+    return '#FFFFFF'
+
+# --- GENERADOR DE EXCEL MULTIPESTAÑA ---
+def crear_excel_consignas(df_ventas, df_inv):
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+        workbook = writer.book
         
-    if df_total.empty or 'FECHA' not in df_total.columns:
-        df_vacio = df_inventario_filtrado[['NP']].drop_duplicates().copy()
-        df_vacio[['HITS', 'CONSUMO MENSUAL', 'meses_distintos_10m', 'ventas_meses_11_y_12']] = 0
-        return df_vacio
+        # Formatos
+        fmt_blue = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#10345C', 'font_color': 'white', 'border': 1})
+        fmt_gray = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#D3D3D3', 'font_color': 'black', 'border': 1})
+        fmt_white = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'border': 1})
+        cell_fmt = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'border_color': '#D3D3D3'})
         
-    df_total['FECHA'] = pd.to_datetime(df_total['FECHA'], dayfirst=True, errors='coerce')
-    df_total['NP'] = df_total['NP'].astype(str).str.strip()
-    df_total['CANTIDAD'] = pd.to_numeric(df_total['CANTIDAD'], errors='coerce').fillna(0)
-
-    df_10m = df_total[(df_total['FECHA'] >= fecha_inicio_10m) & (df_total['FECHA'] <= hoy)]
-    df_11_12 = df_total[(df_total['FECHA'] >= fecha_inicio_12m) & (df_total['FECHA'] < fecha_inicio_10m)]
-    df_12m = df_total[(df_total['FECHA'] >= fecha_inicio_12m) & (df_total['FECHA'] <= hoy)]
-
-    df_10m_pos = df_10m[df_10m['CANTIDAD'] > 0].copy()
-    if not df_10m_pos.empty:
-        df_10m_pos['PERIODO'] = df_10m_pos['FECHA'].dt.strftime('%Y-%m')
-        meses_10m = df_10m_pos.groupby('NP')['PERIODO'].nunique().reset_index().rename(columns={'PERIODO': 'meses_distintos_10m'})
-    else: meses_10m = pd.DataFrame(columns=['NP', 'meses_distintos_10m'])
-
-    ventas_11_12 = df_11_12[df_11_12['CANTIDAD'] > 0].groupby('NP').size().reset_index().rename(columns={0: 'ventas_meses_11_y_12'})
-
-    metricas_12m = df_12m.groupby('NP').agg(
-        total_eventos=('CANTIDAD', 'count'), eventos_negativos=('CANTIDAD', lambda x: (x < 0).sum()), suma_cantidad=('CANTIDAD', 'sum')
-    ).reset_index()
-    
-    metricas_12m['HITS'] = (metricas_12m['total_eventos'] - (metricas_12m['eventos_negativos'] * 2)).clip(lower=0)
-    metricas_12m['CONSUMO MENSUAL'] = metricas_12m['suma_cantidad'] / 12
-
-    df_base = df_inventario_filtrado[['NP']].drop_duplicates()
-    df_base = pd.concat([df_base, metricas_12m[['NP']]]).drop_duplicates().reset_index(drop=True)
-    
-    df_base = pd.merge(df_base, meses_10m, on='NP', how='left').fillna(0)
-    df_base = pd.merge(df_base, ventas_11_12, on='NP', how='left').fillna(0)
-    df_base = pd.merge(df_base, metricas_12m[['NP', 'HITS', 'CONSUMO MENSUAL']], on='NP', how='left').fillna(0)
-    
-    return df_base
-
-# --- DISEÑO EXCEL ---
-def formatear_excel_planeacion(writer, df, sheet_name, cols_apoyo):
-    workbook = writer.book
-    worksheet = writer.sheets[sheet_name]
-    
-    # Congelar paneles (Fila 1 fija)
-    worksheet.freeze_panes(1, 0)
-    
-    fmt_base = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#10345C', 'font_color': 'white', 'border': 1})
-    fmt_local = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#4B8BBE', 'font_color': 'white', 'border': 1})
-    fmt_foraneo = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#A64d4d', 'font_color': 'white', 'border': 1})
-    fmt_input = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#F2F2F2', 'font_color': 'black', 'border': 1})
-    cell_fmt = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'border_color': '#D3D3D3'})
-    
-    # 1. PINTAR ENCABEZADOS
-    for col_num, value in enumerate(df.columns.values):
-        col_name = str(value).upper()
+        # 1. HOJA "CONSIGNAS" (Indice/Portada)
+        ws_cons = workbook.add_worksheet("CONSIGNAS")
+        ws_cons.set_tab_color('#D3D3D3') # Gris Claro
+        ws_cons.write("A1", "REPORTE GLOBAL DE CONSIGNAS", fmt_blue)
+        ws_cons.set_column('A:A', 40)
         
-        if col_num < 4: 
-            style = fmt_base
-        elif "NUEVO TRASPASO" in col_name or "CANTIDAD A TRASPASAR" in col_name:
-            style = fmt_input
-        elif col_name in cols_apoyo:
-            style = fmt_foraneo
-        else: 
-            style = fmt_local
+        # 2. PROCESAR CADA ALMACÉN
+        for alm in TODOS_ALMACENES:
+            # Filtrar ventas del almacen
+            df_v_alm = df_ventas[df_ventas['ALMACEN'] == alm.upper()]
             
-        worksheet.write(0, col_num, value, style)
-    
-    worksheet.set_column('A:A', 18, cell_fmt)
-    worksheet.set_column('B:B', 40, cell_fmt) 
-    worksheet.set_column('C:Z', 15, cell_fmt)
-    
-    # 2. INYECTAR FÓRMULAS EXCEL ROW BY ROW
-    # Orden de columnas en el DF generado:
-    # A=NP, B=DESC, C=LINEA, D=CLASIFICACION, E=SUGERIDO, F=EXIST LOCAL, G=FEC COMPRA LOCAL, H=PROM LOCAL, I=HITS LOCAL
-    # J=INV APOYO, K=PROM APOYO, L=HITS APOYO, M=FEC APOYO, N=TRANSITO, O=TRASPASO APOYO A LOCAL
-    # P=NUEVO TRASPASO, Q=CANT TRASPASAR, R=INV TOTAL, S=MESES VTA ACT, T=POR FINCAR
-    
-    start_row = 1
-    for i in range(len(df)):
-        row = start_row + i
-        excel_row = row + 1 
-        
-        # P: NUEVO TRASPASO (Validación Lista SI/NO)
-        worksheet.data_validation(row, 15, row, 15, {'validate': 'list', 'source': ['SI', 'NO']})
-        
-        # R: INV. TOTAL = F (Existencia) + N (Transito) + O (Traspaso Viejo) + Q (Cantidad Traspasar Nueva)
-        f_inv_total = f'=F{excel_row}+N{excel_row}+O{excel_row}+Q{excel_row}'
-        worksheet.write_formula(row, 17, f_inv_total, cell_fmt)
-        
-        # S: MESES VENTA ACTUAL = R (Inv Total) / H (Promedio Local)
-        f_meses_act = f'=IFERROR(R{excel_row}/H{excel_row}, 0)'
-        worksheet.write_formula(row, 18, f_meses_act, cell_fmt)
-        
-        # T: POR FINCAR = Sugerido (E) - Cantidad a Traspasar (Q) (Y que no sea negativo)
-        f_por_fincar = f'=IF((E{excel_row}-Q{excel_row})>0, E{excel_row}-Q{excel_row}, 0)'
-        worksheet.write_formula(row, 19, f_por_fincar, cell_fmt)
-
-# --- INTERFAZ GRAFICA ---
-with st.spinner("⏳ Conectando con Drive y descargando Inventario Maestro..."):
-    df_inventario_maestro = cargar_inventario_maestro()
-
-if df_inventario_maestro is not None:
-    st.success("✅ Base de Datos Conectada.")
-    
-    # Creamos lista combinada "SUCURSAL - ALMACEN" para evitar duplicados visuales
-    df_inventario_maestro['SUC_ALM'] = df_inventario_maestro['SUCURSAL'].astype(str) + " - " + df_inventario_maestro['ALMACEN'].astype(str)
-    lista_opciones = sorted(df_inventario_maestro['SUC_ALM'].dropna().unique().tolist())
-    
-    st.markdown("### 1. Selección de Parámetros")
-    opcion_seleccionada = st.selectbox("🏬 Selecciona la Sucursal y Almacén a Planear (Local):", lista_opciones)
-    
-    # Separar la selección
-    sucursal_local, almacen_local = opcion_seleccionada.split(" - ", 1)
-    
-    # Motor de Reglas Automáticas
-    sucursal_apoyo, almacen_apoyo = determinar_apoyo(sucursal_local, almacen_local)
-    
-    # Mostrar la lógica deducida al usuario para que sepa qué está pasando
-    st.info(f"📍 **Almacén Local a planear:** {almacen_local} ({sucursal_local})\n\n🤝 **El sistema cruzará automáticamente con:** {almacen_apoyo} ({sucursal_apoyo})")
-
-    st.markdown("---")
-    col_c, col_d = st.columns([1, 2])
-    meses_cob = col_c.number_input("🎯 Meta de Cobertura (Meses):", min_value=0.5, value=1.5, step=0.5)
-    
-    st.markdown("### 2. Archivos en Tránsito y Situación")
-    col3, col4 = st.columns(2)
-    file_transito = col3.file_uploader("🚢 Archivo de Tránsito (Local)", type=["xlsx"])
-    filtro_traspaso = col4.text_input(f"Nomenclatura Traspaso hacia {sucursal_local} (Ej. TRASUCTU):", "")
-    file_traspasos = col4.file_uploader("🚛 Archivo Situación (Traspasos)", type=["xlsx", "xls"])
-
-    if st.button("🚀 Generar Planeación Mensual"):
-        my_bar = st.progress(5, text="Iniciando cálculos...")
-        
-        # 1. Extraer Local
-        df_inv_local = df_inventario_maestro[(df_inventario_maestro['ALMACEN'] == almacen_local) & (df_inventario_maestro['SUCURSAL'] == sucursal_local)]
-        df_local = extraer_metricas_ventas(sucursal_local, almacen_local, df_inv_local, my_bar, 10, 45)
-        
-        inv_resumen_local = df_inv_local.groupby('NP').agg({'DESCRIPCION': 'first', 'LINEA': 'first', 'EXISTENCIA': 'sum', 'FEC_ULT_COMPRA': 'first'}).reset_index()
-        df_final = pd.merge(df_local, inv_resumen_local, on='NP', how='left')
-        df_final['EXISTENCIA'] = df_final['EXISTENCIA'].fillna(0)
-        df_final['CLASIFICACIÓN'] = df_final.apply(clasificar_movimiento, axis=1)
-        
-        # 2. Extraer Apoyo
-        my_bar.progress(50, text=f"Procesando datos del apoyo: {almacen_apoyo}...")
-        df_inv_apoyo = df_inventario_maestro[(df_inventario_maestro['ALMACEN'] == almacen_apoyo) & (df_inventario_maestro['SUCURSAL'] == sucursal_apoyo)]
-        df_apoyo = extraer_metricas_ventas(sucursal_apoyo, almacen_apoyo, df_inv_apoyo, my_bar, 55, 80)
-        inv_resumen_apoyo = df_inv_apoyo.groupby('NP').agg({'EXISTENCIA': 'sum', 'FEC_ULT_COMPRA': 'first'}).reset_index()
-        
-        df_apoyo_completo = pd.merge(df_apoyo, inv_resumen_apoyo, on='NP', how='left')
-        
-        # Generar nombres dinámicos para columnas de apoyo
-        col_inv_apoyo = f'INV. {almacen_apoyo} ({sucursal_apoyo})'
-        col_prom_apoyo = f'PROM. {almacen_apoyo} ({sucursal_apoyo})'
-        col_hits_apoyo = f'HITS {almacen_apoyo} ({sucursal_apoyo})'
-        col_fec_apoyo = f'FEC ULT COMPRA {almacen_apoyo} ({sucursal_apoyo})'
-        nombre_traspaso = f'TRASPASO {almacen_apoyo} A {almacen_local}'
-        
-        df_apoyo_completo.rename(columns={
-            'EXISTENCIA': col_inv_apoyo,
-            'CONSUMO MENSUAL': col_prom_apoyo,
-            'HITS': col_hits_apoyo,
-            'FEC_ULT_COMPRA': col_fec_apoyo
-        }, inplace=True)
-        
-        # Cruzar con Local
-        cols_to_merge = ['NP', col_inv_apoyo, col_prom_apoyo, col_hits_apoyo, col_fec_apoyo]
-        df_final = pd.merge(df_final, df_apoyo_completo[cols_to_merge], on='NP', how='left').fillna(0)
-        
-        my_bar.progress(85, text="Aplicando tránsitos y matemáticas...")
-        # 3. Transitos y Traspasos
-        df_transito = procesar_transito(file_transito) if file_transito else pd.DataFrame(columns=["NP", "TRANSITO"])
-        df_traspasos = procesar_traspasos(file_traspasos, filtro_traspaso) if (file_traspasos and filtro_traspaso) else pd.DataFrame(columns=["NP", "CANTIDAD_TRASPASO"])
-        
-        df_final = pd.merge(df_final, df_transito, on='NP', how='left').fillna(0)
-        df_final = pd.merge(df_final, df_traspasos, on='NP', how='left').fillna(0)
-        df_final.rename(columns={'CANTIDAD_TRASPASO': nombre_traspaso}, inplace=True)
-
-        # 4. CÁLCULO DEL SUGERIDO MENSUAL
-        df_final['SUGERIDO MENSUAL'] = (df_final['CONSUMO MENSUAL'] * meses_cob) - df_final['EXISTENCIA'] - df_final['TRANSITO']
-        df_final['SUGERIDO MENSUAL'] = df_final['SUGERIDO MENSUAL'].apply(lambda x: math.ceil(x) if x > 0 else 0)
-
-        # Agregamos las columnas "Input" y "Formula" vacías para estructurar el Excel
-        df_final['NUEVO TRASPASO'] = ''
-        df_final['CANTIDAD A TRASPASAR'] = 0
-        df_final['INV. TOTAL'] = 0
-        df_final['MESES VENTA ACTUAL'] = 0
-        df_final['POR FINCAR'] = 0
-
-        # 5. ORDENAR COLUMNAS PARA EL EXCEL (20 Columnas Exactas)
-        df_final.rename(columns={'CONSUMO MENSUAL': f'PROMEDIO LOCAL', 'HITS': 'HITS LOCAL'}, inplace=True)
-        
-        columnas_ordenadas = [
-            'NP', 'DESCRIPCION', 'LINEA', 'CLASIFICACIÓN', 'SUGERIDO MENSUAL', 
-            'EXISTENCIA', 'FEC_ULT_COMPRA', 'PROMEDIO LOCAL', 'HITS LOCAL',
-            col_inv_apoyo, col_prom_apoyo, col_hits_apoyo, col_fec_apoyo,
-            'TRANSITO', nombre_traspaso,
-            'NUEVO TRASPASO', 'CANTIDAD A TRASPASAR', 
-            'INV. TOTAL', 'MESES VENTA ACTUAL', 'POR FINCAR'
-        ]
-        
-        df_export = df_final[columnas_ordenadas].copy()
-        
-        # 6. EXPORTAR A EXCEL
-        my_bar.progress(95, text="🎨 Generando Excel Corporativo...")
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-            nombre_hoja = almacen_local[:30].replace('/', '-') 
-            df_export.to_excel(writer, sheet_name=nombre_hoja, index=False)
+            if df_v_alm.empty:
+                # Si no hay ventas, pasamos al siguiente o creamos hoja vacia
+                resumen = pd.DataFrame(columns=['NP', 'DESCR', 'VENTA', 'HITS'])
+            else:
+                # Agrupar ventas (Venta Total y HITS)
+                resumen = df_v_alm.groupby('NP').agg(
+                    DESCR=('DESCR', 'first'),
+                    VENTA=('CANTIDAD', 'sum'),
+                    total_ev=('CANTIDAD', 'count'),
+                    neg_ev=('CANTIDAD', lambda x: (x < 0).sum())
+                ).reset_index()
+                # HITS: Total eventos positivos y quitamos los negativos dobles
+                resumen['HITS'] = (resumen['total_ev'] - (resumen['neg_ev'] * 2)).clip(lower=0)
             
-            # Pasamos los nombres exactos de las columnas de apoyo para que la función sepa cuáles pintar de Rojo
-            cols_apoyo = [col_inv_apoyo.upper(), col_prom_apoyo.upper(), col_hits_apoyo.upper(), col_fec_apoyo.upper(), nombre_traspaso.upper()]
-            formatear_excel_final(writer, df_export, nombre_hoja, cols_apoyo)
+            # Cruzar con inventario para Existencia
+            if df_inv is not None and not df_inv.empty:
+                df_i_alm = df_inv[df_inv['ALMACEN'] == alm.upper()]
+                inv_exist = df_i_alm.groupby('NP')['EXISTENCIA'].sum().reset_index()
+                resumen = pd.merge(resumen, inv_exist, on='NP', how='left')
+                resumen['EXISTENCIA'] = resumen['EXISTENCIA'].fillna(0)
+            else:
+                resumen['EXISTENCIA'] = 0
             
-        buffer.seek(0)
-        fecha_str = datetime.datetime.now().strftime("%d_%m_%Y")
-        name_file = f"Planeacion_{almacen_local.replace(' ', '')}_{fecha_str}.xlsx"
-        
-        link = subir_excel_a_drive(buffer, name_file)
-        my_bar.progress(100, text="✅ ¡Completado!")
-        
-        if link:
-            st.success(f"✅ Reporte Maestro Creado: {name_file}")
-            st.markdown(f"### [📂 Abrir en Google Drive]({link})")
+            # Limpiar casos donde las ventas sean 0 y existencia 0 (Basura)
+            if not resumen.empty:
+                resumen = resumen[(resumen['VENTA'] != 0) | (resumen['HITS'] > 0)]
+            
+            # Preparar DataFrame de la Hoja
+            df_hoja = pd.DataFrame()
+            df_hoja['N° DE PARTE'] = resumen['NP'] if not resumen.empty else []
+            df_hoja['DESCR'] = resumen['DESCR'] if not resumen.empty else []
+            df_hoja['VENTA'] = resumen['VENTA'] if not resumen.empty else []
+            df_hoja['HITS'] = resumen['HITS'] if not resumen.empty else []
+            df_hoja['DEMANDA'] = ''
+            df_hoja['PROMEDIO (12)'] = ''
+            df_hoja['MIN (1)'] = ''
+            df_hoja['MAX (3)'] = ''
+            df_hoja['INVENTARIO EXISTENCIA'] = resumen['EXISTENCIA'] if not resumen.empty else []
+            df_hoja['VENTA ACTUAL'] = ''
+            df_hoja['EXCESO INVENTARIO'] = ''
+            df_hoja['TRASPASO REQUERIDO'] = ''
+            df_hoja['COMENTARIOS'] = ''
+            
+            sheet_name = alm[:31] # Excel limit
+            df_hoja.to_excel(writer, sheet_name=sheet_name, index=False)
+            ws = writer.sheets[sheet_name]
+            
+            # Colores de la pestaña
+            ws.set_tab_color(obtener_color_pestana(alm))
+            ws.freeze_panes(1, 0)
+            
+            # Escribir Encabezados con colores
+            columnas = df_hoja.columns.tolist()
+            for col_num, col_name in enumerate(columnas):
+                if col_name in ['N° DE PARTE', 'DESCR', 'VENTA', 'HITS']:
+                    ws.write(0, col_num, col_name, fmt_blue)
+                elif col_name == 'COMENTARIOS':
+                    ws.write(0, col_num, col_name, fmt_white)
+                else:
+                    ws.write(0, col_num, col_name, fmt_gray)
+            
+            # Anchos de columna
+            ws.set_column('A:A', 20, cell_fmt)
+            ws.set_column('B:B', 45, cell_fmt)
+            ws.set_column('C:L', 15, cell_fmt)
+            ws.set_column('M:M', 30, cell_fmt) # Comentarios ancho
+            
+            # Fórmulas de Excel
+            # A=0, B=1, C(VENTA)=2, D(HITS)=3, E(DEM)=4, F(PROM)=5, G(MIN)=6, H(MAX)=7, I(INV)=8, J(VTA ACT)=9, K(EXC)=10, L(TRASP)=11
+            start_row = 1
+            for i in range(len(df_hoja)):
+                row = start_row + i
+                ex_row = row + 1
+                
+                # E: DEMANDA -> Alta (>12), Media (6 a 12), Baja (<6)
+                f_dem = f'=IF(D{ex_row}>12,"ALTA",IF(D{ex_row}>=6,"MEDIA","BAJA"))'
+                ws.write_formula(row, 4, f_dem, cell_fmt)
+                
+                # F: PROMEDIO (12) -> Venta / 12
+                f_prom = f'=IFERROR(C{ex_row}/12, 0)'
+                ws.write_formula(row, 5, f_prom, cell_fmt)
+                
+                # G: MIN (1) -> Promedio * 1
+                f_min = f'=F{ex_row}*1'
+                ws.write_formula(row, 6, f_min, cell_fmt)
+                
+                # H: MAX (3) -> Promedio * 3
+                f_max = f'=F{ex_row}*3'
+                ws.write_formula(row, 7, f_max, cell_fmt)
+                
+                # J: VENTA ACTUAL -> Inventario / Promedio
+                f_vtact = f'=IFERROR(I{ex_row}/F{ex_row}, 0)'
+                ws.write_formula(row, 9, f_vtact, cell_fmt)
+                
+                # K: EXCESO INVENTARIO -> SI Inventario > Max
+                f_exc = f'=IF(I{ex_row}>H{ex_row},"SI","NO")'
+                ws.write_formula(row, 10, f_exc, cell_fmt)
+                
+                # L: TRASPASO REQUERIDO -> Inventario - Max
+                f_trasp = f'=I{ex_row}-H{ex_row}'
+                ws.write_formula(row, 11, f_trasp, cell_fmt)
 
-else:
-    st.warning("⚠️ Revisa los accesos del robot al archivo INVENTARIO_CRA.")
+    buffer.seek(0)
+    return buffer
+
+# --- INTERFAZ GRAFICA STREAMLIT ---
+st.info("💡 Haz clic en el botón para que el sistema descargue todas las bases, filtre las fechas dinámicas y genere el Excel de 16 pestañas.")
+
+if st.button("🚀 Generar Reporte de Consignas"):
+    with st.spinner("Iniciando motor de descarga (Esto puede tomar un par de minutos)..."):
+        
+        # 1. Cargar Inventario General
+        df_inv = cargar_inventario_maestro()
+        if df_inv is None:
+            st.error("No se pudo leer el archivo INVENTARIO_CRA de Drive.")
+            st.stop()
+            
+        # 2. Cargar TODAS las ventas de los últimos 12 meses
+        df_ventas, f_inicio, f_fin = descargar_todas_las_ventas_12m()
+        if df_ventas is None:
+            st.error("No se encontraron registros de ventas en Master Ventas.")
+            st.stop()
+            
+        st.success(f"✅ Bases descargadas. Analizando periodo cerrado: **{f_inicio.strftime('%b %Y')} a { (f_fin - relativedelta(days=1)).strftime('%b %Y')}**")
+        
+        # 3. Generar el MEGA EXCEL
+        with st.spinner("Procesando almacenes, calculando hits, promedios y coloreando pestañas..."):
+            buffer_excel = crear_excel_consignas(df_ventas, df_inv)
+            
+        # 4. Subir a Drive
+        with st.spinner("☁️ Subiendo archivo final a Google Drive..."):
+            fecha_str = datetime.datetime.now().strftime("%d_%m_%Y")
+            name_file = f"Analisis_Consignas_{fecha_str}.xlsx"
+            link = subir_excel_a_drive(buffer_excel, name_file)
+            
+            if link:
+                st.balloons()
+                st.success(f"🎉 ¡Reporte Multi-Almacén Creado Exitosamente: {name_file}!")
+                st.markdown(f"### [📂 Abrir Reporte de Consignas en Drive]({link})")
