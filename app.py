@@ -328,7 +328,8 @@ def crear_excel_consignas(df_ventas, df_inv):
                 f_exc = f'=IF(I{ex_row}>H{ex_row},"SI","NO")'
                 ws.write_formula(row, 10, f_exc, cell_fmt_text)
                 
-                f_trasp = f'=I{ex_row}-H{ex_row}'
+                # --- AQUÍ ESTÁ EL CAMBIO SOLICITADO (=H-I) ---
+                f_trasp = f'=H{ex_row}-I{ex_row}' 
                 ws.write_formula(row, 11, f_trasp, cell_fmt)
                 
                 ws.write(row, 12, '', cell_fmt_text)
