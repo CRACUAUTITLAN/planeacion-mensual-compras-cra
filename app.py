@@ -242,7 +242,7 @@ def crear_excel_consignas(df_ventas, df_inv):
         ws_cons.write(1, 1, "DESCR", fmt_blue)
         ws_cons.write(1, 2, "TRASPASO TOTAL", fmt_blue)
         ws_cons.write(1, 3, "INV. DISPONIBLE CRA", fmt_blue)
-        ws_cons.write(1, 4, "FALTANTE CRA", fmt_blue)
+        ws_cons.write(1, 4, "COMPRA SUGERIDA", fmt_blue)  # <--- CAMBIO DE NOMBRE AQUÍ
 
         for i, alm in enumerate(TODOS_ALMACENES):
             ws_cons.write(1, 5 + i, alm, fmt_gray)
@@ -263,7 +263,9 @@ def crear_excel_consignas(df_ventas, df_inv):
             
             ws_cons.write_formula(row, 2, f"=SUM(F{ex_row}:{last_col_letter}{ex_row})", cell_fmt)
             ws_cons.write(row, 3, df_cons_base.loc[i, 'EXISTENCIA'], cell_fmt)
-            ws_cons.write_formula(row, 4, f"=C{ex_row}+D{ex_row}", cell_fmt)
+            
+            # <--- NUEVA FÓRMULA AQUÍ: =MAX(0, C - D)
+            ws_cons.write_formula(row, 4, f"=MAX(0, C{ex_row}-D{ex_row})", cell_fmt) 
             
             for j, alm in enumerate(TODOS_ALMACENES):
                 sheet_name_alm = alm[:31]
