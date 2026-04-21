@@ -73,7 +73,6 @@ def subir_excel_a_drive(buffer, nombre_archivo):
         return archivo.get('webViewLink')
     except Exception: return None
 
-# --- CARGA INVENTARIO MAESTRO (LIBRE DE MENSAJES UI PARA EVITAR ERROR DE CACHÉ) ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def cargar_inventario_maestro():
     if not INVENTORY_FOLDER_ID: return None
@@ -87,8 +86,6 @@ def cargar_inventario_maestro():
             return None
 
         target_file = files[0]
-        print(f"Descargando: {target_file['name']}")
-        
         content = descargar_archivo_drive(target_file['id'])
         if content:
             engine = 'xlrd' if 'xls' in target_file['name'].lower() and 'xlsx' not in target_file['name'].lower() else 'openpyxl'
@@ -105,7 +102,6 @@ def cargar_inventario_maestro():
         print(f"Error en carga de inventario maestro: {e}")
         return None
 
-# --- EXTRACCIÓN MASIVA DE VENTAS ---
 def buscar_archivos_ventas(agencia, anios):
     archivos_encontrados = []
     if not MASTER_SALES_ID: return []
@@ -155,7 +151,6 @@ def descargar_todas_las_ventas_12m():
     
     return df_global, fecha_inicio, fecha_fin
 
-# --- LISTADOS Y COLORES POR ZONA ---
 ALMACENES_CUAUTI = ["ALM. BOÑAR", "ALM. FAST FOOD", "ALM. LIPU", "ALM. MYM", "ALM. UTEP"]
 ALMACENES_TULTI = ["ALM. ENLACES LOGISTICOS", "ALMACEN AFN", "BISONTE TEPOTZOTLAN", "CULVERT", "TDR", "TEISA", "TUMSA", "ZONTE"]
 ALMACENES_BAJIO = ["ALM. UTEP SAN LUIS", "BISONTE SLP"]
@@ -186,7 +181,6 @@ def crear_excel_consignas(df_ventas, df_inv):
 
         for alm in TODOS_ALMACENES:
             df_v_alm = df_ventas[df_ventas['ALMACEN'] == alm.upper()]
-            
             resumen_ventas = pd.DataFrame()
             if not df_v_alm.empty:
                 resumen_ventas = df_v_alm.groupby('NP').agg(
@@ -215,7 +209,6 @@ def crear_excel_consignas(df_ventas, df_inv):
                     resumen['DESCR'] = resumen['DESCR'].combine_first(resumen['DESCR_INV']).fillna('')
                 elif 'DESCR_INV' in resumen.columns:
                     resumen['DESCR'] = resumen['DESCR_INV'].fillna('')
-                
                 resumen = resumen[(resumen['VENTA'] != 0) | (resumen['HITS'] > 0) | (resumen['EXISTENCIA'] != 0)].reset_index(drop=True)
             else:
                 resumen = pd.DataFrame(columns=['NP', 'DESCR', 'VENTA', 'HITS', 'EXISTENCIA'])
@@ -226,7 +219,6 @@ def crear_excel_consignas(df_ventas, df_inv):
 
         # --- 1. CREAR HOJA "CONSIGNAS" ---
         df_cons_base = pd.concat(todas_partes).drop_duplicates(subset=['NP']).reset_index(drop=True) if todas_partes else pd.DataFrame(columns=['NP', 'DESCR'])
-        
         if df_inv is not None and not df_inv.empty:
             df_inv_gral = df_inv[df_inv['ALMACEN'] == 'ALM. GENERAL']
             inv_gral_agg = df_inv_gral.groupby('NP')['EXISTENCIA'].sum().reset_index()
@@ -267,16 +259,14 @@ def crear_excel_consignas(df_ventas, df_inv):
             ex_row = row + 1
             ws_cons.write(row, 0, df_cons_base.loc[i, 'NP'], cell_fmt_text)
             ws_cons.write(row, 1, df_cons_base.loc[i, 'DESCR'], cell_fmt_text)
-            
             ws_cons.write_formula(row, 2, f"=SUM(F{ex_row}:{last_col_letter}{ex_row})", cell_fmt)
             ws_cons.write(row, 3, df_cons_base.loc[i, 'EXISTENCIA'], cell_fmt)
-            
-            # --- FÓRMULA COMPRA SUGERIDA = MAX(0, C-D) ---
             ws_cons.write_formula(row, 4, f"=MAX(0, C{ex_row}-D{ex_row})", cell_fmt) 
             
             for j, alm in enumerate(TODOS_ALMACENES):
                 sheet_name_alm = alm[:31]
-                formula = f"=SUMIF('{sheet_name_alm}'!A:A, $A{ex_row}, '{sheet_name_alm}'!L:L)"
+                # Ahora busca en la columna M (index 12) que es donde está el nuevo TRASPASO REQUERIDO
+                formula = f"=SUMIF('{sheet_name_alm}'!A:A, $A{ex_row}, '{sheet_name_alm}'!M:M)"
                 ws_cons.write_formula(row, 5 + j, formula, cell_fmt)
 
         # --- 2. CREAR HOJAS INDIVIDUALES DE ALMACENES ---
@@ -287,12 +277,13 @@ def crear_excel_consignas(df_ventas, df_inv):
             ws.set_tab_color(obtener_color_pestana(alm))
             ws.freeze_panes(1, 0)
             
-            if not df_hoja.empty:
-                ws.autofilter(0, 0, len(df_hoja), 12)
-            else:
-                ws.autofilter(0, 0, 0, 12)
-                
-            encabezados = ['N° DE PARTE', 'DESCR', 'VENTA', 'HITS', 'DEMANDA', 'PROMEDIO (12)', 'MIN (1)', 'MAX (3)', 'INVENTARIO EXISTENCIA', 'VENTA ACTUAL', 'EXCESO INVENTARIO', 'TRASPASO REQUERIDO', 'COMENTARIOS']
+            # Encabezados actualizados según tu nueva regla
+            encabezados = [
+                'N° DE PARTE', 'DESCR', 'VENTA', 'HITS', 'DEMANDA', 
+                'PROMEDIO (12)', 'BAJA (.5)', 'MEDIA (1)', 'ALTA (1.5)', 
+                'INVENTARIO EXISTENCIA', 'VENTA ACTUAL', 'EXCESO INVENTARIO', 
+                'TRASPASO REQUERIDO', 'COMENTARIOS'
+            ]
             
             for col_num, col_name in enumerate(encabezados):
                 if col_name in ['N° DE PARTE', 'DESCR', 'VENTA', 'HITS']:
@@ -304,44 +295,56 @@ def crear_excel_consignas(df_ventas, df_inv):
             
             ws.set_column('A:A', 20, cell_fmt_text)
             ws.set_column('B:B', 45, cell_fmt_text)
-            ws.set_column('C:L', 15, cell_fmt)
-            ws.set_column('M:M', 30, cell_fmt_text)
+            ws.set_column('C:M', 15, cell_fmt)
+            ws.set_column('N:N', 30, cell_fmt_text)
             
             start_row = 1
             for i in range(len(df_hoja)):
                 row = start_row + i
                 ex_row = row + 1
                 
+                # Columnas base
                 ws.write(row, 0, df_hoja.loc[i, 'NP'], cell_fmt_text)
                 ws.write(row, 1, df_hoja.loc[i, 'DESCR'], cell_fmt_text)
                 ws.write(row, 2, df_hoja.loc[i, 'VENTA'], cell_fmt)
                 ws.write(row, 3, df_hoja.loc[i, 'HITS'], cell_fmt)
                 
+                # DEMANDA (Col E / Index 4)
                 f_dem = f'=IF(D{ex_row}>12,"ALTA",IF(AND(D{ex_row}>=6,D{ex_row}<=12),"MEDIA","BAJA"))'
                 ws.write_formula(row, 4, f_dem, cell_fmt_text)
                 
+                # PROMEDIO (Col F / Index 5)
                 f_prom = f'=IFERROR(C{ex_row}/12, 0)'
                 ws.write_formula(row, 5, f_prom, cell_fmt)
                 
-                f_min = f'=F{ex_row}*1'
-                ws.write_formula(row, 6, f_min, cell_fmt)
+                # BAJA .5 (Col G / Index 6) -> PROMEDIO * 0.5
+                ws.write_formula(row, 6, f'=F{ex_row}*0.5', cell_fmt)
                 
-                f_max = f'=F{ex_row}*3'
-                ws.write_formula(row, 7, f_max, cell_fmt)
+                # MEDIA 1 (Col H / Index 7) -> PROMEDIO * 1
+                ws.write_formula(row, 7, f'=F{ex_row}*1', cell_fmt)
                 
-                ws.write(row, 8, df_hoja.loc[i, 'EXISTENCIA'], cell_fmt)
+                # ALTA 1.5 (Col I / Index 8) -> PROMEDIO * 1.5
+                ws.write_formula(row, 8, f'=F{ex_row}*1.5', cell_fmt)
                 
-                f_vtact = f'=IFERROR(I{ex_row}/F{ex_row}, 0)'
-                ws.write_formula(row, 9, f_vtact, cell_fmt)
+                # EXISTENCIA (Col J / Index 9)
+                ws.write(row, 9, df_hoja.loc[i, 'EXISTENCIA'], cell_fmt)
                 
-                f_exc = f'=IF(I{ex_row}>H{ex_row},"SI","NO")'
-                ws.write_formula(row, 10, f_exc, cell_fmt_text)
+                # VENTA ACTUAL (Col K / Index 10)
+                f_vtact = f'=IFERROR(J{ex_row}/F{ex_row}, 0)'
+                ws.write_formula(row, 10, f_vtact, cell_fmt)
                 
-                # --- FÓRMULA TRASPASO REQUERIDO = H - I ---
-                f_trasp = f'=H{ex_row}-I{ex_row}' 
-                ws.write_formula(row, 11, f_trasp, cell_fmt)
+                # EXCESO INVENTARIO (Col L / Index 11)
+                # Lógica: Si existencia > (Stock según demanda)
+                f_exc = f'=IF(J{ex_row}>IF(E{ex_row}="ALTA",I{ex_row},IF(E{ex_row}="MEDIA",H{ex_row},G{ex_row})),"SI","NO")'
+                ws.write_formula(row, 11, f_exc, cell_fmt_text)
                 
-                ws.write(row, 12, '', cell_fmt_text)
+                # TRASPASO REQUERIDO (Col M / Index 12)
+                # Lógica según tu nueva regla: (Factor según Demanda) - EXISTENCIA
+                f_trasp = f'=IF(E{ex_row}="ALTA", I{ex_row}-J{ex_row}, IF(E{ex_row}="MEDIA", H{ex_row}-J{ex_row}, G{ex_row}-J{ex_row}))'
+                ws.write_formula(row, 12, f_trasp, cell_fmt)
+                
+                # COMENTARIOS (Col N / Index 13)
+                ws.write(row, 13, '', cell_fmt_text)
 
     buffer.seek(0)
     return buffer
@@ -350,21 +353,20 @@ def crear_excel_consignas(df_ventas, df_inv):
 st.info("💡 Haz clic en el botón para que el sistema descargue todas las bases, filtre las fechas dinámicas y genere el Excel de Consignas con Múltiples Pestañas.")
 
 if st.button("🚀 Generar Reporte de Consignas"):
-    with st.spinner("Iniciando motor de descarga (Esto puede tomar un par de minutos)..."):
-        
+    with st.spinner("Iniciando motor de descarga..."):
         df_inv = cargar_inventario_maestro()
         if df_inv is None:
-            st.error("No se pudo leer el archivo INVENTARIO_CRA de Drive. Revisa que exista y tenga las columnas correctas.")
+            st.error("No se pudo leer el archivo INVENTARIO_CRA de Drive.")
             st.stop()
             
         df_ventas, f_inicio, f_fin = descargar_todas_las_ventas_12m()
         if df_ventas is None:
-            st.error("No se encontraron registros de ventas en Master Ventas.")
+            st.error("No se encontraron registros de ventas.")
             st.stop()
             
-        st.success(f"✅ Bases descargadas. Analizando periodo cerrado: **{f_inicio.strftime('%b %Y')} a { (f_fin - relativedelta(days=1)).strftime('%b %Y')}**")
+        st.success(f"✅ Bases descargadas. Periodo: **{f_inicio.strftime('%b %Y')} a { (f_fin - relativedelta(days=1)).strftime('%b %Y')}**")
         
-        with st.spinner("Procesando almacenes, calculando fórmulas cruzadas y aplicando diseño corporativo..."):
+        with st.spinner("Procesando almacenes y aplicando nueva lógica de demanda (0.5, 1, 1.5)..."):
             buffer_excel = crear_excel_consignas(df_ventas, df_inv)
             
         with st.spinner("☁️ Subiendo archivo final a Google Drive..."):
@@ -374,5 +376,5 @@ if st.button("🚀 Generar Reporte de Consignas"):
             
             if link:
                 st.balloons()
-                st.success(f"🎉 ¡Reporte Multi-Almacén Creado Exitosamente: {name_file}!")
+                st.success(f"🎉 ¡Reporte con Lógica de Demanda Creado Exitosamente!")
                 st.markdown(f"### [📂 Abrir Reporte de Consignas en Drive]({link})")
