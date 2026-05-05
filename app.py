@@ -150,10 +150,9 @@ def descargar_todas_las_ventas_12m():
     
     return df_global, fecha_inicio, fecha_fin
 
-# --- NUEVAS LISTAS DE ALMACENES SEGÚN REGLA ---
+# --- NUEVAS LISTAS DE ALMACENES SEGÚN REGLA (BISONTE SLP EN TULTITLAN) ---
 ALMACENES_CUAUTI = ["ALM. BOÑAR", "ALM. FAST FOOD", "ALM. LIPU", "ALM. MYM", "ALM. UTEP", "ALM. UTEP SAN LUIS"]
-# AQUÍ ESTÁ EL CAMBIO PARA BISONTE TEPOTZOTLAN
-ALMACENES_TULTI = ["ALM. ENLACES LOGISTICOS", "ALMACEN AFN", "BISONTE TEPOTZOTLAN", "CULVERT", "TDR", "TEISA", "TUMSA", "ZONTE"]
+ALMACENES_TULTI = ["ALM. ENLACES LOGISTICOS", "ALMACEN AFN", "BISONTE SLP", "BISONTE TEPOTZOTLAN", "CULVERT", "TDR", "TEISA", "TUMSA", "ZONTE"]
 TODOS_ALMACENES = sorted(ALMACENES_CUAUTI + ALMACENES_TULTI)
 
 def obtener_color_pestana(almacen):
@@ -171,6 +170,11 @@ def crear_excel_consignas(df_ventas, df_inv):
         fmt_blue = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#10345C', 'font_color': 'white', 'border': 1, 'text_wrap': True})
         fmt_gray = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#D3D3D3', 'font_color': 'black', 'border': 1, 'text_wrap': True})
         fmt_white = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'border': 1, 'text_wrap': True})
+        
+        # Nuevos formatos para los encabezados de los almacenes en la hoja CONSIGNAS
+        fmt_header_cuauti = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#4B8BBE', 'font_color': 'white', 'border': 1, 'text_wrap': True})
+        fmt_header_tulti = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#FF9999', 'font_color': 'black', 'border': 1, 'text_wrap': True})
+
         cell_fmt = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'border_color': '#D3D3D3', 'num_format': '0'})
         cell_fmt_text = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'border_color': '#D3D3D3'})
         
@@ -209,7 +213,7 @@ def crear_excel_consignas(df_ventas, df_inv):
             datos_almacenes[alm] = resumen
             if not resumen.empty: todas_partes.append(resumen[['NP', 'DESCR']])
 
-        # --- 1. CREAR HOJA "CONSIGNAS" (CON NUEVA ESTRUCTURA) ---
+        # --- 1. CREAR HOJA "CONSIGNAS" ---
         df_cons_base = pd.concat(todas_partes).drop_duplicates(subset=['NP']).reset_index(drop=True) if todas_partes else pd.DataFrame(columns=['NP', 'DESCR'])
         
         # Procesar Inventario Separado por Sucursal
@@ -233,7 +237,7 @@ def crear_excel_consignas(df_ventas, df_inv):
         ws_cons.set_tab_color('#D3D3D3')
         ws_cons.freeze_panes(2, 0)
         
-        last_col_cons = 7 + len(TODOS_ALMACENES) # NP(0), DESCR(1), TRAS_C(2), TRAS_T(3), INV_C(4), INV_T(5), COMP_C(6), COMP_T(7)
+        last_col_cons = 7 + len(TODOS_ALMACENES)
         if not df_cons_base.empty:
             ws_cons.autofilter(1, 0, len(df_cons_base) + 1, last_col_cons)
 
@@ -255,8 +259,10 @@ def crear_excel_consignas(df_ventas, df_inv):
         ws_cons.write(1, 6, "COMPRA SUG. CUAUTITLAN", fmt_blue)
         ws_cons.write(1, 7, "COMPRA SUG. TULTITLAN", fmt_blue)
 
+        # Color dinámico para los almacenes en la hoja de resumen
         for i, alm in enumerate(TODOS_ALMACENES):
-            ws_cons.write(1, 8 + i, alm, fmt_gray)
+            fmt_color_alm = fmt_header_cuauti if alm.upper() in [x.upper() for x in ALMACENES_CUAUTI] else fmt_header_tulti
+            ws_cons.write(1, 8 + i, alm, fmt_color_alm)
 
         # Anchos
         ws_cons.set_column('A:A', 20, cell_fmt_text)
@@ -298,7 +304,7 @@ def crear_excel_consignas(df_ventas, df_inv):
                 formula = f"=SUMIF('{sheet_name_alm}'!A:A, $A{ex_row}, '{sheet_name_alm}'!M:M)"
                 ws_cons.write_formula(row, 8 + j, formula, cell_fmt)
 
-        # --- 2. CREAR HOJAS INDIVIDUALES DE ALMACENES (Lógica previa mantenida) ---
+        # --- 2. CREAR HOJAS INDIVIDUALES DE ALMACENES ---
         for alm in TODOS_ALMACENES:
             df_hoja, sheet_name = datos_almacenes[alm], alm[:31]
             ws = workbook.add_worksheet(sheet_name)
