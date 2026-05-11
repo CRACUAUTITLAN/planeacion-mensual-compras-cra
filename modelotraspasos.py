@@ -1,38 +1,14 @@
+# modelotraspasos.py
 import streamlit as st
 import pandas as pd
 import io
 import datetime
 from dateutil.relativedelta import relativedelta
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 from xlsxwriter.utility import xl_col_to_name
 
-# Configuración de la página
-st.set_page_config(page_title="Consignas - CRA", layout="wide")
-st.title("💎 CRA INT: Análisis Global de Consignas")
-st.markdown("Generación automatizada de inventarios y requerimientos para almacenes foráneos y consignas.")
-
-# --- CONFIGURACIÓN GOOGLE DRIVE ---
-@st.cache_resource
-def get_drive_service():
-    try:
-        gcp_creds = dict(st.secrets["gcp_service_account"])
-        creds = service_account.Credentials.from_service_account_info(
-            gcp_creds, scopes=['https://www.googleapis.com/auth/drive']
-        )
-        return build('drive', 'v3', credentials=creds)
-    except Exception as e:
-        st.error(f"⚠️ Error de conexión: {e}")
-        st.stop()
-
-drive_service = get_drive_service()
-MASTER_SALES_ID = st.secrets["general"].get("master_sales_id")
-INVENTORY_FOLDER_ID = st.secrets["general"].get("inventory_folder_id")
-PARENT_FOLDER_ID = st.secrets["general"]["drive_folder_id"]
-
-# --- FUNCIONES DRIVE ---
-def descargar_archivo_drive(file_id):
+# --- FUNCIONES DRIVE LOCALES AL MÓDULO ---
+def descargar_archivo_drive(drive_service, file_id):
     try:
         request = drive_service.files().get_media(fileId=file_id)
         file = io.BytesIO()
@@ -45,7 +21,7 @@ def descargar_archivo_drive(file_id):
         print(f"Error al descargar archivo de Drive: {e}")
         return None
 
-def buscar_o_crear_carpeta(nombre_carpeta, parent_id):
+def buscar_o_crear_carpeta(drive_service, nombre_carpeta, parent_id):
     try:
         query = f"mimeType='application/vnd.google-apps.folder' and name='{nombre_carpeta}' and '{parent_id}' in parents and trashed=false"
         results = drive_service.files().list(q=query, fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
@@ -57,15 +33,15 @@ def buscar_o_crear_carpeta(nombre_carpeta, parent_id):
             return folder.get('id')
     except Exception: return None
 
-def subir_excel_a_drive(buffer, nombre_archivo):
+def subir_excel_a_drive(drive_service, parent_folder_id, buffer, nombre_archivo):
     try:
         fecha_hoy = datetime.datetime.now()
         anio = str(fecha_hoy.year)
         meses_es = {1:"01_Enero", 2:"02_Febrero", 3:"03_Marzo", 4:"04_Abril", 5:"05_Mayo", 6:"06_Junio", 7:"07_Julio", 8:"08_Agosto", 9:"09_Septiembre", 10:"10_Octubre", 11:"11_Noviembre", 12:"12_Diciembre"}
         mes_carpeta = meses_es[fecha_hoy.month]
 
-        id_anio = buscar_o_crear_carpeta(anio, PARENT_FOLDER_ID)
-        id_mes = buscar_o_crear_carpeta(mes_carpeta, id_anio)
+        id_anio = buscar_o_crear_carpeta(drive_service, anio, parent_folder_id)
+        id_mes = buscar_o_crear_carpeta(drive_service, mes_carpeta, id_anio)
         
         media = MediaIoBaseUpload(buffer, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', resumable=True)
         file_metadata = {'name': nombre_archivo, 'parents': [id_mes]}
@@ -74,55 +50,44 @@ def subir_excel_a_drive(buffer, nombre_archivo):
     except Exception: return None
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def cargar_inventario_maestro():
-    if not INVENTORY_FOLDER_ID: return None
+def cargar_inventario_maestro(_drive_service, inventory_folder_id):
+    if not inventory_folder_id: return None
     try:
-        query = f"name contains 'INVENTARIO_CRA' and '{INVENTORY_FOLDER_ID}' in parents and trashed=false"
-        results = drive_service.files().list(q=query, fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
+        query = f"name contains 'INVENTARIO_CRA' and '{inventory_folder_id}' in parents and trashed=false"
+        results = _drive_service.files().list(q=query, fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
         files = results.get('files', [])
         
-        if not files: 
-            print("No se encontró ningún archivo con 'INVENTARIO_CRA'")
-            return None
+        if not files: return None
 
         target_file = files[0]
-        content = descargar_archivo_drive(target_file['id'])
+        content = descargar_archivo_drive(_drive_service, target_file['id'])
         if content:
             engine = 'xlrd' if 'xls' in target_file['name'].lower() and 'xlsx' not in target_file['name'].lower() else 'openpyxl'
             df_inv = pd.read_excel(content, engine=engine)
             df_inv.columns = df_inv.columns.str.upper().str.strip()
             
             if 'NP' in df_inv.columns and 'ALMACEN' in df_inv.columns:
-                # LIMPIEZA EXTREMA: Remueve .0 flotantes del NP
                 df_inv['NP'] = df_inv['NP'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-                
-                # LIMPIEZA EXTREMA: Remueve dobles espacios y estandariza nombres de almacén
                 df_inv['ALMACEN'] = df_inv['ALMACEN'].astype(str).str.replace(r'\s+', ' ', regex=True).str.strip().str.upper()
-                
                 if 'SUCURSAL' in df_inv.columns:
                     df_inv['SUCURSAL'] = df_inv['SUCURSAL'].astype(str).str.strip().str.upper()
-                
-                # LIMPIEZA EXTREMA: Forzar que EXISTENCIA sea Numérico sí o sí
                 if 'EXISTENCIA' in df_inv.columns:
                     df_inv['EXISTENCIA'] = pd.to_numeric(df_inv['EXISTENCIA'], errors='coerce').fillna(0)
-                    
             return df_inv
         return None
-    except Exception as e:
-        print(f"Error en carga de inventario maestro: {e}")
-        return None
+    except Exception: return None
 
-def buscar_archivos_ventas(agencia, anios):
+def buscar_archivos_ventas(drive_service, master_sales_id, agencia, anios):
     archivos_encontrados = []
-    if not MASTER_SALES_ID: return []
+    if not master_sales_id: return []
     for anio in anios:
-        query = f"name contains '{agencia}' and name contains '{anio}' and name contains 'MASTER' and '{MASTER_SALES_ID}' in parents and trashed=false"
+        query = f"name contains '{agencia}' and name contains '{anio}' and name contains 'MASTER' and '{master_sales_id}' in parents and trashed=false"
         results = drive_service.files().list(q=query, fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
         archivos_encontrados.extend(results.get('files', []))
     return archivos_encontrados
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def descargar_todas_las_ventas_12m():
+def descargar_todas_las_ventas_12m(_drive_service, master_sales_id):
     hoy = datetime.datetime.now()
     fecha_fin = hoy.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     fecha_inicio = fecha_fin - relativedelta(years=1)
@@ -131,11 +96,11 @@ def descargar_todas_las_ventas_12m():
     sucursales = ["CUAUTITLAN", "TULTITLAN", "BAJIO"]
     files_metadata = []
     for suc in sucursales:
-        files_metadata.extend(buscar_archivos_ventas(suc, anios_drive))
+        files_metadata.extend(buscar_archivos_ventas(_drive_service, master_sales_id, suc, anios_drive))
         
     dfs = []
     for file_meta in files_metadata:
-        content = descargar_archivo_drive(file_meta['id'])
+        content = descargar_archivo_drive(_drive_service, file_meta['id'])
         if content:
             try:
                 engine = 'xlrd' if 'xls' in file_meta['name'].lower() and 'xlsx' not in file_meta['name'].lower() else 'openpyxl'
@@ -143,9 +108,7 @@ def descargar_todas_las_ventas_12m():
                 df_temp.columns = df_temp.columns.str.upper().str.strip()
                 cols_utiles = [c for c in df_temp.columns if c in ['NP', 'DESCR', 'FECHA', 'ALMACEN', 'CANTIDAD']]
                 dfs.append(df_temp[cols_utiles])
-            except Exception as e: 
-                print(f"Error al procesar ventas {file_meta['name']}: {e}")
-                pass
+            except Exception: pass
             
     if not dfs: return None, fecha_inicio, fecha_fin
     
@@ -154,25 +117,23 @@ def descargar_todas_las_ventas_12m():
     mask = (df_global['FECHA'] >= fecha_inicio) & (df_global['FECHA'] < fecha_fin)
     df_global = df_global[mask].copy()
     
-    # LIMPIEZA EXTREMA también en ventas para que empaten al 100%
     df_global['NP'] = df_global['NP'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
     df_global['ALMACEN'] = df_global['ALMACEN'].astype(str).str.replace(r'\s+', ' ', regex=True).str.strip().str.upper()
     df_global['CANTIDAD'] = pd.to_numeric(df_global['CANTIDAD'], errors='coerce').fillna(0)
     
     return df_global, fecha_inicio, fecha_fin
 
-# --- NUEVAS LISTAS DE ALMACENES SEGÚN REGLA ---
+# --- LISTAS DE ALMACENES ---
 ALMACENES_CUAUTI = ["ALM. BOÑAR", "ALM. FAST FOOD", "ALM. LIPU", "ALM. MYM", "ALM. UTEP", "ALM. UTEP SAN LUIS"]
 ALMACENES_TULTI = ["ALM. ENLACES LOGISTICOS", "ALMACEN AFN", "BISONTE SLP", "BISONTE TEPOTZOTLAN", "CULVERT", "TDR", "TEISA", "TUMSA", "ZONTE"]
 TODOS_ALMACENES = sorted(ALMACENES_CUAUTI + ALMACENES_TULTI)
 
 def obtener_color_pestana(almacen):
     alm = almacen.upper()
-    if alm in [x.upper() for x in ALMACENES_CUAUTI]: return '#4B8BBE' # Azul
-    if alm in [x.upper() for x in ALMACENES_TULTI]: return '#FF9999' # Rojo
+    if alm in [x.upper() for x in ALMACENES_CUAUTI]: return '#4B8BBE'
+    if alm in [x.upper() for x in ALMACENES_TULTI]: return '#FF9999'
     return '#FFFFFF'
 
-# --- GENERADOR DE EXCEL MULTIPESTAÑA ---
 def crear_excel_consignas(df_ventas, df_inv):
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
@@ -181,8 +142,6 @@ def crear_excel_consignas(df_ventas, df_inv):
         fmt_blue = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#10345C', 'font_color': 'white', 'border': 1, 'text_wrap': True})
         fmt_gray = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#D3D3D3', 'font_color': 'black', 'border': 1, 'text_wrap': True})
         fmt_white = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'border': 1, 'text_wrap': True})
-        
-        # Nuevos formatos para los encabezados de los almacenes en la hoja CONSIGNAS
         fmt_header_cuauti = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#4B8BBE', 'font_color': 'white', 'border': 1, 'text_wrap': True})
         fmt_header_tulti = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#FF9999', 'font_color': 'black', 'border': 1, 'text_wrap': True})
 
@@ -204,7 +163,6 @@ def crear_excel_consignas(df_ventas, df_inv):
             inv_exist = pd.DataFrame()
             if df_inv is not None and not df_inv.empty:
                 df_i_alm = df_inv[df_inv['ALMACEN'] == alm.upper()]
-                # Prevenir error si DESCRIPCION no existe en el origen
                 if 'DESCRIPCION' in df_i_alm.columns:
                     inv_exist = df_i_alm.groupby('NP').agg(EXISTENCIA=('EXISTENCIA', 'sum'), DESCR_INV=('DESCRIPCION', 'first')).reset_index()
                 else:
@@ -228,15 +186,11 @@ def crear_excel_consignas(df_ventas, df_inv):
             datos_almacenes[alm] = resumen
             if not resumen.empty: todas_partes.append(resumen[['NP', 'DESCR']])
 
-        # --- 1. CREAR HOJA "CONSIGNAS" ---
         df_cons_base = pd.concat(todas_partes).drop_duplicates(subset=['NP']).reset_index(drop=True) if todas_partes else pd.DataFrame(columns=['NP', 'DESCR'])
         
-        # Procesar Inventario Separado por Sucursal
         if df_inv is not None and not df_inv.empty:
-            # Cuautitlan
             inv_cuauti = df_inv[(df_inv['SUCURSAL'] == 'CUAUTITLAN') & (df_inv['ALMACEN'] == 'ALM. GENERAL')]
             inv_cuauti_agg = inv_cuauti.groupby('NP')['EXISTENCIA'].sum().reset_index().rename(columns={'EXISTENCIA': 'INV_CUAUTI'})
-            # Tultitlan
             inv_tulti = df_inv[(df_inv['SUCURSAL'] == 'TULTITLAN') & (df_inv['ALMACEN'] == 'ALM. GENERAL')]
             inv_tulti_agg = inv_tulti.groupby('NP')['EXISTENCIA'].sum().reset_index().rename(columns={'EXISTENCIA': 'INV_TULTI'})
             
@@ -256,7 +210,6 @@ def crear_excel_consignas(df_ventas, df_inv):
         if not df_cons_base.empty:
             ws_cons.autofilter(1, 0, len(df_cons_base) + 1, last_col_cons)
 
-        # -- ENCABEZADOS FILA 1 (FILA 0 INDEX) --
         ws_cons.write(0, 0, "", fmt_blue)
         ws_cons.write(0, 1, "", fmt_blue)
         ws_cons.merge_range(0, 2, 0, 3, "TRASPASO REQUERIDO", fmt_blue)
@@ -264,7 +217,6 @@ def crear_excel_consignas(df_ventas, df_inv):
         ws_cons.merge_range(0, 6, 0, 7, "COMPRA SUGERIDA", fmt_blue)
         ws_cons.merge_range(0, 8, 0, last_col_cons, "DETALLE POR ALMACÉN", fmt_blue)
 
-        # -- ENCABEZADOS FILA 2 (FILA 1 INDEX) --
         ws_cons.write(1, 0, "N° DE PARTE", fmt_blue)
         ws_cons.write(1, 1, "DESCR", fmt_blue)
         ws_cons.write(1, 2, "TRASPASO CUAUTITLAN", fmt_blue)
@@ -274,18 +226,15 @@ def crear_excel_consignas(df_ventas, df_inv):
         ws_cons.write(1, 6, "COMPRA SUG. CUAUTITLAN", fmt_blue)
         ws_cons.write(1, 7, "COMPRA SUG. TULTITLAN", fmt_blue)
 
-        # Color dinámico para los almacenes en la hoja de resumen
         for i, alm in enumerate(TODOS_ALMACENES):
             fmt_color_alm = fmt_header_cuauti if alm.upper() in [x.upper() for x in ALMACENES_CUAUTI] else fmt_header_tulti
             ws_cons.write(1, 8 + i, alm, fmt_color_alm)
 
-        # Anchos
         ws_cons.set_column('A:A', 20, cell_fmt_text)
         ws_cons.set_column('B:B', 45, cell_fmt_text)
         ws_cons.set_column('C:H', 18, cell_fmt)
         ws_cons.set_column(8, last_col_cons, 16, cell_fmt)
 
-        # Datos y Fórmulas
         for i in range(len(df_cons_base)):
             row, ex_row = 2 + i, 3 + i
             ws_cons.write(row, 0, df_cons_base.loc[i, 'NP'], cell_fmt_text)
@@ -314,7 +263,6 @@ def crear_excel_consignas(df_ventas, df_inv):
                 formula = f"=SUMIF('{sheet_name_alm}'!A:A, $A{ex_row}, '{sheet_name_alm}'!M:M)"
                 ws_cons.write_formula(row, 8 + j, formula, cell_fmt)
 
-        # --- 2. CREAR HOJAS INDIVIDUALES DE ALMACENES ---
         for alm in TODOS_ALMACENES:
             df_hoja, sheet_name = datos_almacenes[alm], alm[:31]
             ws = workbook.add_worksheet(sheet_name)
@@ -351,32 +299,34 @@ def crear_excel_consignas(df_ventas, df_inv):
     buffer.seek(0)
     return buffer
 
-# --- INTERFAZ GRAFICA ---
-st.info("💡 Generación de Reporte Segmentado por Sucursal (Cuautitlán / Tultitlán)")
+def modulo_traspasos(drive_service, master_sales_id, inventory_folder_id, parent_folder_id):
+    st.title("💎 CRA INT: Modelo Traspasos")
+    st.markdown("Generación automatizada de inventarios y requerimientos globales.")
+    st.info("💡 Haz clic en el botón para generar el Reporte Segmentado Completo.")
 
-if st.button("🚀 Generar Reporte de Consignas"):
-    with st.spinner("Descargando bases..."):
-        df_inv = cargar_inventario_maestro()
-        if df_inv is None:
-            st.error("Error al cargar inventario maestro.")
-            st.stop()
+    if st.button("🚀 Generar Reporte de Consignas"):
+        with st.spinner("Descargando bases..."):
+            df_inv = cargar_inventario_maestro(drive_service, inventory_folder_id)
+            if df_inv is None:
+                st.error("Error al cargar inventario maestro.")
+                st.stop()
+                
+            df_ventas, f_inicio, f_fin = descargar_todas_las_ventas_12m(drive_service, master_sales_id)
+            if df_ventas is None:
+                st.error("No se encontraron registros de ventas.")
+                st.stop()
+                
+            st.success(f"✅ Periodo: **{f_inicio.strftime('%b %Y')} a { (f_fin - relativedelta(days=1)).strftime('%b %Y')}**")
             
-        df_ventas, f_inicio, f_fin = descargar_todas_las_ventas_12m()
-        if df_ventas is None:
-            st.error("No se encontraron registros de ventas.")
-            st.stop()
-            
-        st.success(f"✅ Periodo: **{f_inicio.strftime('%b %Y')} a { (f_fin - relativedelta(days=1)).strftime('%b %Y')}**")
-        
-        with st.spinner("Procesando segmentación por sucursal y lógica de traspasos..."):
-            buffer_excel = crear_excel_consignas(df_ventas, df_inv)
-            
-        with st.spinner("Subiendo a Drive..."):
-            fecha_str = datetime.datetime.now().strftime("%d_%m_%Y")
-            name_file = f"Analisis_Consignas_Segmentado_{fecha_str}.xlsx"
-            link = subir_excel_a_drive(buffer_excel, name_file)
-            
-            if link:
-                st.balloons()
-                st.success(f"🎉 ¡Reporte Segmentado Creado!")
-                st.markdown(f"### [📂 Abrir Reporte en Drive]({link})")
+            with st.spinner("Procesando segmentación por sucursal y lógica de traspasos..."):
+                buffer_excel = crear_excel_consignas(df_ventas, df_inv)
+                
+            with st.spinner("Subiendo a Drive..."):
+                fecha_str = datetime.datetime.now().strftime("%d_%m_%Y")
+                name_file = f"Analisis_Consignas_Segmentado_{fecha_str}.xlsx"
+                link = subir_excel_a_drive(drive_service, parent_folder_id, buffer_excel, name_file)
+                
+                if link:
+                    st.balloons()
+                    st.success(f"🎉 ¡Reporte Segmentado Creado!")
+                    st.markdown(f"### [📂 Abrir Reporte en Drive]({link})")
