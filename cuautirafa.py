@@ -75,24 +75,40 @@ def procesar_cuautitlan_rafa(uploaded_file):
             ws = workbook.add_worksheet("CONSIGNAS")
             ws.freeze_panes(1, 0)
             
+            # --- FORMATOS DE ENCABEZADO Y SEMÁFORO ---
             fmt_header = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#4B8BBE', 'font_color': 'white', 'border': 1, 'text_wrap': True})
-            cell_fmt_txt = workbook.add_format({'valign': 'vcenter', 'border': 1, 'border_color': '#D3D3D3'})
-            cell_fmt_num = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'border_color': '#D3D3D3', 'num_format': '0'})
             
             fmt_green = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#C6EFCE', 'font_color': '#006100', 'num_format': '0'})
             fmt_yellow = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#FFEB9C', 'font_color': '#9C5700', 'num_format': '0'})
             fmt_red = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#FFC7CE', 'font_color': '#9C0006', 'num_format': '0'})
 
+            # --- NUEVOS FORMATOS TIPO "CEBRA" (Fila par / Fila impar) ---
+            # Textos (NP y DESCR)
+            fmt_txt_even = workbook.add_format({'valign': 'vcenter', 'border': 1, 'border_color': '#D3D3D3', 'bg_color': '#FFFFFF'})
+            fmt_txt_odd  = workbook.add_format({'valign': 'vcenter', 'border': 1, 'border_color': '#D3D3D3', 'bg_color': '#F2F2F2'}) # Gris muy clarito
+            
+            # Números
+            fmt_num_even = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'border_color': '#D3D3D3', 'bg_color': '#FFFFFF', 'num_format': '0'})
+            fmt_num_odd  = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'border_color': '#D3D3D3', 'bg_color': '#F2F2F2', 'num_format': '0'})
+
+            # Escribir encabezados
             for col_idx, col_name in enumerate(df_cons_renamed.columns):
                 ws.write(0, col_idx, col_name, fmt_header)
             
+            # Anchos
             ws.set_column('A:A', 20)
             ws.set_column('B:B', 45)
             ws.set_column('C:Z', 18)
 
+            # Insertar Data y aplicar lógica Semáforo + Cebra
             for row_idx in range(len(df_cons)):
                 row_data = df_cons.iloc[row_idx]
                 np_val = row_data.get('N° DE PARTE', '')
+                
+                # Detectar si la fila es par o impar para aplicar el color cebra base
+                is_odd_row = (row_idx % 2 != 0)
+                base_fmt_txt = fmt_txt_odd if is_odd_row else fmt_txt_even
+                base_fmt_num = fmt_num_odd if is_odd_row else fmt_num_even
                 
                 for col_idx, col_original in enumerate(df_cons.columns):
                     val = row_data[col_original]
@@ -100,8 +116,11 @@ def procesar_cuautitlan_rafa(uploaded_file):
                     if col_original in ALMACENES_CUAUTI:
                         t_val = pd.to_numeric(val, errors='coerce')
                         t_val = t_val if pd.notnull(t_val) else 0
-                        current_fmt = cell_fmt_num
                         
+                        # Iniciamos con el color cebra por defecto
+                        current_fmt = base_fmt_num
+                        
+                        # Semáforo exclusivo para los clasificados como ALTA (Sobrescribe el color cebra)
                         if np_val in alm_data[col_original]:
                             demanda = alm_data[col_original][np_val].get('DEMANDA', '')
                             v_alta = pd.to_numeric(alm_data[col_original][np_val].get('ALTA (1.5)', 0), errors='coerce')
@@ -117,9 +136,9 @@ def procesar_cuautitlan_rafa(uploaded_file):
                         
                         ws.write(row_idx + 1, col_idx, t_val, current_fmt)
                     elif col_original in ['N° DE PARTE', 'DESCR']:
-                        ws.write(row_idx + 1, col_idx, val, cell_fmt_txt)
+                        ws.write(row_idx + 1, col_idx, val, base_fmt_txt)
                     else:
-                        ws.write(row_idx + 1, col_idx, val, cell_fmt_num)
+                        ws.write(row_idx + 1, col_idx, val, base_fmt_num)
         output.seek(0)
         return output
     except Exception as e:
@@ -128,13 +147,13 @@ def procesar_cuautitlan_rafa(uploaded_file):
 
 def modulo_cuautitlan_rafa():
     st.title("🏭 CUAUTITLÁN RAFA: Análisis Específico")
-    st.markdown("Carga el **Reporte Segmentado de Consignas** generado en el otro módulo para obtener la versión exclusiva de Cuautitlán con semáforos y % de éxito.")
+    st.markdown("Carga el **Reporte Segmentado de Consignas** generado en el otro módulo para obtener la versión exclusiva de Cuautitlán con semáforos, colores intercalados y % de éxito.")
     
     archivo_subido = st.file_uploader("📂 Sube tu archivo Excel", type=["xlsx"])
     
     if archivo_subido is not None:
         if st.button("🪄 Generar Archivo Filtrado"):
-            with st.spinner("Leyendo estructura, evaluando semáforos y procesando % de éxito..."):
+            with st.spinner("Leyendo estructura, evaluando semáforos y formateando tabla..."):
                 buffer_resultado = procesar_cuautitlan_rafa(archivo_subido)
                 
                 if buffer_resultado:
