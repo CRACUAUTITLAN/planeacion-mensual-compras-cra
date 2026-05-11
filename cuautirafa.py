@@ -16,8 +16,24 @@ def procesar_cuautitlan_rafa(uploaded_file):
         
         df_cons = all_sheets['CONSIGNAS']
         
+        # --- ARREGLO DE ENCABEZADOS COMBINADOS ---
+        # Si pandas agarró la fila de los super-encabezados (cuyo nombre a veces empieza con Unnamed o está vacía)
+        if 'N° DE PARTE' not in df_cons.columns:
+            # Buscamos en qué fila están los encabezados reales
+            for idx, row in df_cons.iterrows():
+                if 'N° DE PARTE' in row.values:
+                    df_cons.columns = row.values
+                    df_cons = df_cons.iloc[idx+1:].reset_index(drop=True)
+                    break
+        # ------------------------------------------
+
         cols_base = ['N° DE PARTE', 'DESCR', 'TRASPASO CUAUTITLAN', 'INV. CUAUTITLAN']
         cols_existentes = [c for c in cols_base + ALMACENES_CUAUTI if c in df_cons.columns]
+        
+        if not cols_existentes:
+            st.error("No se encontraron las columnas necesarias. Revisa el formato del Excel.")
+            return None
+
         df_cons = df_cons[cols_existentes].copy()
 
         alm_data = {}
@@ -25,6 +41,15 @@ def procesar_cuautitlan_rafa(uploaded_file):
             sheet_name = alm[:31]
             if sheet_name in all_sheets:
                 df_alm = all_sheets[sheet_name]
+                
+                # Arreglo de seguridad por si las hojas individuales también sufren de lo mismo
+                if 'N° DE PARTE' not in df_alm.columns:
+                    for idx, row in df_alm.iterrows():
+                        if 'N° DE PARTE' in row.values:
+                            df_alm.columns = row.values
+                            df_alm = df_alm.iloc[idx+1:].reset_index(drop=True)
+                            break
+                
                 if 'N° DE PARTE' in df_alm.columns and 'DEMANDA' in df_alm.columns and 'ALTA (1.5)' in df_alm.columns:
                     alm_data[alm] = df_alm.set_index('N° DE PARTE')[['DEMANDA', 'ALTA (1.5)']].to_dict('index')
                 else: alm_data[alm] = {}
