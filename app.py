@@ -93,10 +93,19 @@ def cargar_inventario_maestro():
             df_inv.columns = df_inv.columns.str.upper().str.strip()
             
             if 'NP' in df_inv.columns and 'ALMACEN' in df_inv.columns:
-                df_inv['NP'] = df_inv['NP'].astype(str).str.strip()
-                df_inv['ALMACEN'] = df_inv['ALMACEN'].astype(str).str.strip().str.upper()
+                # LIMPIEZA EXTREMA: Remueve .0 flotantes del NP
+                df_inv['NP'] = df_inv['NP'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+                
+                # LIMPIEZA EXTREMA: Remueve dobles espacios y estandariza nombres de almacén
+                df_inv['ALMACEN'] = df_inv['ALMACEN'].astype(str).str.replace(r'\s+', ' ', regex=True).str.strip().str.upper()
+                
                 if 'SUCURSAL' in df_inv.columns:
                     df_inv['SUCURSAL'] = df_inv['SUCURSAL'].astype(str).str.strip().str.upper()
+                
+                # LIMPIEZA EXTREMA: Forzar que EXISTENCIA sea Numérico sí o sí
+                if 'EXISTENCIA' in df_inv.columns:
+                    df_inv['EXISTENCIA'] = pd.to_numeric(df_inv['EXISTENCIA'], errors='coerce').fillna(0)
+                    
             return df_inv
         return None
     except Exception as e:
@@ -144,14 +153,16 @@ def descargar_todas_las_ventas_12m():
     df_global['FECHA'] = pd.to_datetime(df_global['FECHA'], dayfirst=True, errors='coerce')
     mask = (df_global['FECHA'] >= fecha_inicio) & (df_global['FECHA'] < fecha_fin)
     df_global = df_global[mask].copy()
-    df_global['NP'] = df_global['NP'].astype(str).str.strip()
-    df_global['ALMACEN'] = df_global['ALMACEN'].astype(str).str.strip().str.upper()
+    
+    # LIMPIEZA EXTREMA también en ventas para que empaten al 100%
+    df_global['NP'] = df_global['NP'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+    df_global['ALMACEN'] = df_global['ALMACEN'].astype(str).str.replace(r'\s+', ' ', regex=True).str.strip().str.upper()
     df_global['CANTIDAD'] = pd.to_numeric(df_global['CANTIDAD'], errors='coerce').fillna(0)
     
     return df_global, fecha_inicio, fecha_fin
 
-# --- NUEVAS LISTAS DE ALMACENES SEGÚN REGLA (BISONTE SLP EN TULTITLAN) ---
-ALMACENES_CUAUTI = ["ALM. BOÑAR", "ALM. FAST FOOD", "ALM. LIPU", "ALM. MYM", "Alm. Utep", "ALM. UTEP SAN LUIS"]
+# --- NUEVAS LISTAS DE ALMACENES SEGÚN REGLA ---
+ALMACENES_CUAUTI = ["ALM. BOÑAR", "ALM. FAST FOOD", "ALM. LIPU", "ALM. MYM", "ALM. UTEP", "ALM. UTEP SAN LUIS"]
 ALMACENES_TULTI = ["ALM. ENLACES LOGISTICOS", "ALMACEN AFN", "BISONTE SLP", "BISONTE TEPOTZOTLAN", "CULVERT", "TDR", "TEISA", "TUMSA", "ZONTE"]
 TODOS_ALMACENES = sorted(ALMACENES_CUAUTI + ALMACENES_TULTI)
 
@@ -193,7 +204,11 @@ def crear_excel_consignas(df_ventas, df_inv):
             inv_exist = pd.DataFrame()
             if df_inv is not None and not df_inv.empty:
                 df_i_alm = df_inv[df_inv['ALMACEN'] == alm.upper()]
-                inv_exist = df_i_alm.groupby('NP').agg(EXISTENCIA=('EXISTENCIA', 'sum'), DESCR_INV=('DESCRIPCION', 'first')).reset_index()
+                # Prevenir error si DESCRIPCION no existe en el origen
+                if 'DESCRIPCION' in df_i_alm.columns:
+                    inv_exist = df_i_alm.groupby('NP').agg(EXISTENCIA=('EXISTENCIA', 'sum'), DESCR_INV=('DESCRIPCION', 'first')).reset_index()
+                else:
+                    inv_exist = df_i_alm.groupby('NP').agg(EXISTENCIA=('EXISTENCIA', 'sum')).reset_index()
             else:
                 inv_exist = pd.DataFrame(columns=['NP', 'EXISTENCIA', 'DESCR_INV'])
 
@@ -276,7 +291,6 @@ def crear_excel_consignas(df_ventas, df_inv):
             ws_cons.write(row, 0, df_cons_base.loc[i, 'NP'], cell_fmt_text)
             ws_cons.write(row, 1, df_cons_base.loc[i, 'DESCR'], cell_fmt_text)
             
-            # Identificar letras de columnas de cada almacén para sumar por zona
             cols_cuauti = []
             cols_tulti = []
             for idx_alm, alm in enumerate(TODOS_ALMACENES):
@@ -286,19 +300,15 @@ def crear_excel_consignas(df_ventas, df_inv):
                 elif alm.upper() in [x.upper() for x in ALMACENES_TULTI]:
                     cols_tulti.append(f"{col_letter}{ex_row}")
             
-            # Sumas Traspasos por Sucursal (C y D)
             ws_cons.write_formula(row, 2, f"=SUM({','.join(cols_cuauti)})" if cols_cuauti else "0", cell_fmt)
             ws_cons.write_formula(row, 3, f"=SUM({','.join(cols_tulti)})" if cols_tulti else "0", cell_fmt)
             
-            # Inv Disponibles (E y F)
             ws_cons.write(row, 4, df_cons_base.loc[i, 'INV_CUAUTI'], cell_fmt)
             ws_cons.write(row, 5, df_cons_base.loc[i, 'INV_TULTI'], cell_fmt)
             
-            # Compra Sugerida (G y H) -> MAX(0, TRASPASO - INV)
             ws_cons.write_formula(row, 6, f"=MAX(0, C{ex_row}-E{ex_row})", cell_fmt)
             ws_cons.write_formula(row, 7, f"=MAX(0, D{ex_row}-F{ex_row})", cell_fmt)
             
-            # Detalle por Almacén (Columna I en adelante)
             for j, alm in enumerate(TODOS_ALMACENES):
                 sheet_name_alm = alm[:31]
                 formula = f"=SUMIF('{sheet_name_alm}'!A:A, $A{ex_row}, '{sheet_name_alm}'!M:M)"
