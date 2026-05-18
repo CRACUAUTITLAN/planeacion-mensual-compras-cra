@@ -1,166 +1,391 @@
-# cuautirafa.py
+# modelotraspasos.py
 import streamlit as st
 import pandas as pd
 import io
 import datetime
+from dateutil.relativedelta import relativedelta
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+from xlsxwriter.utility import xl_col_to_name
 
-# --- LISTA DE ALMACENES EXCLUSIVA ---
-ALMACENES_CUAUTI = ["ALM. BOÑAR", "ALM. FAST FOOD", "ALM. LIPU", "ALM. MYM", "ALM. UTEP", "ALM. UTEP SAN LUIS"]
-
-def procesar_cuautitlan_rafa(uploaded_file):
+# --- FUNCIONES DRIVE LOCALES AL MÓDULO ---
+def descargar_archivo_drive(drive_service, file_id):
     try:
-        all_sheets = pd.read_excel(uploaded_file, sheet_name=None)
-        if 'CONSIGNAS' not in all_sheets:
-            st.error("El archivo no contiene la hoja 'CONSIGNAS'. Asegúrate de subir el reporte correcto.")
-            return None
-        
-        df_cons = all_sheets['CONSIGNAS']
-        
-        # --- ARREGLO DE ENCABEZADOS COMBINADOS ---
-        # Si pandas agarró la fila de los super-encabezados (cuyo nombre a veces empieza con Unnamed o está vacía)
-        if 'N° DE PARTE' not in df_cons.columns:
-            # Buscamos en qué fila están los encabezados reales
-            for idx, row in df_cons.iterrows():
-                if 'N° DE PARTE' in row.values:
-                    df_cons.columns = row.values
-                    df_cons = df_cons.iloc[idx+1:].reset_index(drop=True)
-                    break
-        # ------------------------------------------
-
-        cols_base = ['N° DE PARTE', 'DESCR', 'TRASPASO CUAUTITLAN', 'INV. CUAUTITLAN']
-        cols_existentes = [c for c in cols_base + ALMACENES_CUAUTI if c in df_cons.columns]
-        
-        if not cols_existentes:
-            st.error("No se encontraron las columnas necesarias. Revisa el formato del Excel.")
-            return None
-
-        df_cons = df_cons[cols_existentes].copy()
-
-        alm_data = {}
-        for alm in ALMACENES_CUAUTI:
-            sheet_name = alm[:31]
-            if sheet_name in all_sheets:
-                df_alm = all_sheets[sheet_name]
-                
-                # Arreglo de seguridad por si las hojas individuales también sufren de lo mismo
-                if 'N° DE PARTE' not in df_alm.columns:
-                    for idx, row in df_alm.iterrows():
-                        if 'N° DE PARTE' in row.values:
-                            df_alm.columns = row.values
-                            df_alm = df_alm.iloc[idx+1:].reset_index(drop=True)
-                            break
-                
-                if 'N° DE PARTE' in df_alm.columns and 'DEMANDA' in df_alm.columns and 'ALTA (1.5)' in df_alm.columns:
-                    alm_data[alm] = df_alm.set_index('N° DE PARTE')[['DEMANDA', 'ALTA (1.5)']].to_dict('index')
-                else: alm_data[alm] = {}
-            else: alm_data[alm] = {}
-
-        renombres = {}
-        for alm in ALMACENES_CUAUTI:
-            if alm in df_cons.columns:
-                total_filas = len(df_cons)
-                if total_filas > 0:
-                    col_num = pd.to_numeric(df_cons[alm], errors='coerce').fillna(0)
-                    exitosos = (col_num <= 0).sum()
-                    perc = (exitosos / total_filas) * 100
-                else:
-                    perc = 0
-                renombres[alm] = f"{alm} ({perc:.0f}%)"
-        
-        df_cons_renamed = df_cons.rename(columns=renombres)
-
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            workbook = writer.book
-            ws = workbook.add_worksheet("CONSIGNAS")
-            ws.freeze_panes(1, 0)
-            
-            # --- FORMATOS DE ENCABEZADO Y SEMÁFORO ---
-            fmt_header = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#4B8BBE', 'font_color': 'white', 'border': 1, 'text_wrap': True})
-            
-            fmt_green = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#C6EFCE', 'font_color': '#006100', 'num_format': '0'})
-            fmt_yellow = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#FFEB9C', 'font_color': '#9C5700', 'num_format': '0'})
-            fmt_red = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#FFC7CE', 'font_color': '#9C0006', 'num_format': '0'})
-
-            # --- NUEVOS FORMATOS TIPO "CEBRA" (Fila par / Fila impar) ---
-            # Textos (NP y DESCR)
-            fmt_txt_even = workbook.add_format({'valign': 'vcenter', 'border': 1, 'border_color': '#D3D3D3', 'bg_color': '#FFFFFF'})
-            fmt_txt_odd  = workbook.add_format({'valign': 'vcenter', 'border': 1, 'border_color': '#D3D3D3', 'bg_color': '#F2F2F2'}) # Gris muy clarito
-            
-            # Números
-            fmt_num_even = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'border_color': '#D3D3D3', 'bg_color': '#FFFFFF', 'num_format': '0'})
-            fmt_num_odd  = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'border_color': '#D3D3D3', 'bg_color': '#F2F2F2', 'num_format': '0'})
-
-            # Escribir encabezados
-            for col_idx, col_name in enumerate(df_cons_renamed.columns):
-                ws.write(0, col_idx, col_name, fmt_header)
-            
-            # Anchos
-            ws.set_column('A:A', 20)
-            ws.set_column('B:B', 45)
-            ws.set_column('C:Z', 18)
-
-            # Insertar Data y aplicar lógica Semáforo + Cebra
-            for row_idx in range(len(df_cons)):
-                row_data = df_cons.iloc[row_idx]
-                np_val = row_data.get('N° DE PARTE', '')
-                
-                # Detectar si la fila es par o impar para aplicar el color cebra base
-                is_odd_row = (row_idx % 2 != 0)
-                base_fmt_txt = fmt_txt_odd if is_odd_row else fmt_txt_even
-                base_fmt_num = fmt_num_odd if is_odd_row else fmt_num_even
-                
-                for col_idx, col_original in enumerate(df_cons.columns):
-                    val = row_data[col_original]
-                    
-                    if col_original in ALMACENES_CUAUTI:
-                        t_val = pd.to_numeric(val, errors='coerce')
-                        t_val = t_val if pd.notnull(t_val) else 0
-                        
-                        # Iniciamos con el color cebra por defecto
-                        current_fmt = base_fmt_num
-                        
-                        # Semáforo exclusivo para los clasificados como ALTA (Sobrescribe el color cebra)
-                        if np_val in alm_data[col_original]:
-                            demanda = alm_data[col_original][np_val].get('DEMANDA', '')
-                            v_alta = pd.to_numeric(alm_data[col_original][np_val].get('ALTA (1.5)', 0), errors='coerce')
-                            v_alta = v_alta if pd.notnull(v_alta) else 0
-                            
-                            if demanda == 'ALTA' and t_val > 0:
-                                if t_val <= (v_alta * (1/3)):
-                                    current_fmt = fmt_green
-                                elif t_val <= (v_alta * 0.5):
-                                    current_fmt = fmt_yellow
-                                else:
-                                    current_fmt = fmt_red
-                        
-                        ws.write(row_idx + 1, col_idx, t_val, current_fmt)
-                    elif col_original in ['N° DE PARTE', 'DESCR']:
-                        ws.write(row_idx + 1, col_idx, val, base_fmt_txt)
-                    else:
-                        ws.write(row_idx + 1, col_idx, val, base_fmt_num)
-        output.seek(0)
-        return output
+        request = drive_service.files().get_media(fileId=file_id)
+        file = io.BytesIO()
+        downloader = MediaIoBaseDownload(file, request)
+        done = False
+        while done is False: status, done = downloader.next_chunk()
+        file.seek(0)
+        return file
     except Exception as e:
-        st.error(f"Error procesando el archivo: {e}")
+        print(f"Error al descargar archivo de Drive: {e}")
         return None
 
-def modulo_cuautitlan_rafa():
-    st.title("🏭 CUAUTITLÁN RAFA: Análisis Específico")
-    st.markdown("Carga el **Reporte Segmentado de Consignas** generado en el otro módulo para obtener la versión exclusiva de Cuautitlán con semáforos, colores intercalados y % de éxito.")
+def buscar_o_crear_carpeta(drive_service, nombre_carpeta, parent_id):
+    try:
+        query = f"mimeType='application/vnd.google-apps.folder' and name='{nombre_carpeta}' and '{parent_id}' in parents and trashed=false"
+        results = drive_service.files().list(q=query, fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
+        files = results.get('files', [])
+        if files: return files[0]['id']
+        else:
+            metadata = {'name': nombre_carpeta, 'mimeType': 'application/vnd.google-apps.folder', 'parents': [parent_id]}
+            folder = drive_service.files().create(body=metadata, fields='id', supportsAllDrives=True).execute()
+            return folder.get('id')
+    except Exception: return None
+
+def subir_excel_a_drive(drive_service, parent_folder_id, buffer, nombre_archivo):
+    try:
+        fecha_hoy = datetime.datetime.now()
+        anio = str(fecha_hoy.year)
+        meses_es = {1:"01_Enero", 2:"02_Febrero", 3:"03_Marzo", 4:"04_Abril", 5:"05_Mayo", 6:"06_Junio", 7:"07_Julio", 8:"08_Agosto", 9:"09_Septiembre", 10:"10_Octubre", 11:"11_Noviembre", 12:"12_Diciembre"}
+        mes_carpeta = meses_es[fecha_hoy.month]
+
+        id_anio = buscar_o_crear_carpeta(drive_service, anio, parent_folder_id)
+        id_mes = buscar_o_crear_carpeta(drive_service, mes_carpeta, id_anio)
+        
+        media = MediaIoBaseUpload(buffer, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', resumable=True)
+        file_metadata = {'name': nombre_archivo, 'parents': [id_mes]}
+        archivo = drive_service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink', supportsAllDrives=True).execute()
+        return archivo.get('webViewLink')
+    except Exception: return None
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cargar_inventario_maestro(_drive_service, inventory_folder_id):
+    if not inventory_folder_id: return None
+    try:
+        query = f"name contains 'INVENTARIO_CRA' and '{inventory_folder_id}' in parents and trashed=false"
+        results = _drive_service.files().list(q=query, fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
+        files = results.get('files', [])
+        
+        if not files: return None
+
+        target_file = files[0]
+        content = descargar_archivo_drive(_drive_service, target_file['id'])
+        if content:
+            engine = 'xlrd' if 'xls' in target_file['name'].lower() and 'xlsx' not in target_file['name'].lower() else 'openpyxl'
+            df_inv = pd.read_excel(content, engine=engine)
+            df_inv.columns = df_inv.columns.str.upper().str.strip()
+            
+            if 'NP' in df_inv.columns and 'ALMACEN' in df_inv.columns:
+                df_inv['NP'] = df_inv['NP'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+                df_inv['ALMACEN'] = df_inv['ALMACEN'].astype(str).str.replace(r'\s+', ' ', regex=True).str.strip().str.upper()
+                if 'SUCURSAL' in df_inv.columns:
+                    df_inv['SUCURSAL'] = df_inv['SUCURSAL'].astype(str).str.strip().str.upper()
+                if 'EXISTENCIA' in df_inv.columns:
+                    df_inv['EXISTENCIA'] = pd.to_numeric(df_inv['EXISTENCIA'], errors='coerce').fillna(0)
+            return df_inv
+        return None
+    except Exception: return None
+
+def buscar_archivos_ventas(drive_service, master_sales_id, agencia, anios):
+    archivos_encontrados = []
+    if not master_sales_id: return []
+    for anio in anios:
+        query = f"name contains '{agencia}' and name contains '{anio}' and name contains 'MASTER' and '{master_sales_id}' in parents and trashed=false"
+        results = drive_service.files().list(q=query, fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
+        archivos_encontrados.extend(results.get('files', []))
+    return archivos_encontrados
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def descargar_todas_las_ventas_12m(_drive_service, master_sales_id):
+    hoy = datetime.datetime.now()
+    fecha_fin = hoy.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    fecha_inicio = fecha_fin - relativedelta(years=1)
+    anios_drive = list(set([fecha_inicio.year, fecha_fin.year]))
     
-    archivo_subido = st.file_uploader("📂 Sube tu archivo Excel", type=["xlsx"])
+    sucursales = ["CUAUTITLAN", "TULTITLAN", "BAJIO"]
+    files_metadata = []
+    for suc in sucursales:
+        files_metadata.extend(buscar_archivos_ventas(_drive_service, master_sales_id, suc, anios_drive))
+        
+    dfs = []
+    for file_meta in files_metadata:
+        content = descargar_archivo_drive(_drive_service, file_meta['id'])
+        if content:
+            try:
+                engine = 'xlrd' if 'xls' in file_meta['name'].lower() and 'xlsx' not in file_meta['name'].lower() else 'openpyxl'
+                df_temp = pd.read_excel(content, engine=engine)
+                df_temp.columns = df_temp.columns.str.upper().str.strip()
+                cols_utiles = [c for c in df_temp.columns if c in ['NP', 'DESCR', 'FECHA', 'ALMACEN', 'CANTIDAD']]
+                dfs.append(df_temp[cols_utiles])
+            except Exception: pass
+            
+    if not dfs: return None, fecha_inicio, fecha_fin
     
-    if archivo_subido is not None:
-        if st.button("🪄 Generar Archivo Filtrado"):
-            with st.spinner("Leyendo estructura, evaluando semáforos y formateando tabla..."):
-                buffer_resultado = procesar_cuautitlan_rafa(archivo_subido)
+    df_global = pd.concat(dfs, ignore_index=True)
+    df_global['FECHA'] = pd.to_datetime(df_global['FECHA'], dayfirst=True, errors='coerce')
+    mask = (df_global['FECHA'] >= fecha_inicio) & (df_global['FECHA'] < fecha_fin)
+    df_global = df_global[mask].copy()
+    
+    df_global['NP'] = df_global['NP'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+    df_global['ALMACEN'] = df_global['ALMACEN'].astype(str).str.replace(r'\s+', ' ', regex=True).str.strip().str.upper()
+    df_global['CANTIDAD'] = pd.to_numeric(df_global['CANTIDAD'], errors='coerce').fillna(0)
+    
+    return df_global, fecha_inicio, fecha_fin
+
+# --- LISTAS DE ALMACENES ---
+ALMACENES_CUAUTI = ["ALM. BOÑAR", "ALM. FAST FOOD", "ALM. LIPU", "ALM. MYM", "ALM. UTEP", "ALM. UTEP SAN LUIS"]
+ALMACENES_TULTI = ["ALM. ENLACES LOGISTICOS", "ALMACEN AFN", "BISONTE SLP", "BISONTE TEPOTZOTLAN", "CULVERT", "TDR", "TEISA", "TUMSA", "ZONTE"]
+TODOS_ALMACENES = sorted(ALMACENES_CUAUTI + ALMACENES_TULTI)
+
+def obtener_color_pestana(almacen):
+    alm = almacen.upper()
+    if alm in [x.upper() for x in ALMACENES_CUAUTI]: return '#4B8BBE'
+    if alm in [x.upper() for x in ALMACENES_TULTI]: return '#FF9999'
+    return '#FFFFFF'
+
+def crear_excel_consignas(df_ventas, df_inv):
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+        workbook = writer.book
+        
+        fmt_blue = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#10345C', 'font_color': 'white', 'border': 1, 'text_wrap': True})
+        fmt_gray = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#D3D3D3', 'font_color': 'black', 'border': 1, 'text_wrap': True})
+        fmt_white = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'border': 1, 'text_wrap': True})
+        fmt_header_cuauti = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#4B8BBE', 'font_color': 'white', 'border': 1, 'text_wrap': True})
+        fmt_header_tulti = workbook.add_format({'bold': True, 'valign': 'vcenter', 'align': 'center', 'bg_color': '#FF9999', 'font_color': 'black', 'border': 1, 'text_wrap': True})
+
+        cell_fmt = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'border_color': '#D3D3D3', 'num_format': '0'})
+        cell_fmt_text = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'border_color': '#D3D3D3'})
+        
+        datos_almacenes = {}
+        todas_partes = []
+
+        # --- PRECALCULAR DATOS EN PYTHON PARA EVITAR ERROR AL NO ABRIR EXCEL ---
+        for alm in TODOS_ALMACENES:
+            df_v_alm = df_ventas[df_ventas['ALMACEN'] == alm.upper()]
+            resumen_ventas = pd.DataFrame()
+            if not df_v_alm.empty:
+                resumen_ventas = df_v_alm.groupby('NP').agg(DESCR=('DESCR', 'first'), VENTA=('CANTIDAD', 'sum'), total_ev=('CANTIDAD', 'count'), neg_ev=('CANTIDAD', lambda x: (x < 0).sum())).reset_index()
+                resumen_ventas['HITS'] = (resumen_ventas['total_ev'] - (resumen_ventas['neg_ev'] * 2)).clip(lower=0)
+            else:
+                resumen_ventas = pd.DataFrame(columns=['NP', 'DESCR', 'VENTA', 'HITS'])
+
+            inv_exist = pd.DataFrame()
+            if df_inv is not None and not df_inv.empty:
+                df_i_alm = df_inv[df_inv['ALMACEN'] == alm.upper()]
+                if 'DESCRIPCION' in df_i_alm.columns:
+                    inv_exist = df_i_alm.groupby('NP').agg(EXISTENCIA=('EXISTENCIA', 'sum'), DESCR_INV=('DESCRIPCION', 'first')).reset_index()
+                else:
+                    inv_exist = df_i_alm.groupby('NP').agg(EXISTENCIA=('EXISTENCIA', 'sum')).reset_index()
+            else:
+                inv_exist = pd.DataFrame(columns=['NP', 'EXISTENCIA', 'DESCR_INV'])
+
+            if not resumen_ventas.empty or not inv_exist.empty:
+                resumen = pd.merge(resumen_ventas, inv_exist, on='NP', how='outer')
+                resumen['VENTA'] = resumen['VENTA'].fillna(0)
+                resumen['HITS'] = resumen['HITS'].fillna(0)
+                resumen['EXISTENCIA'] = resumen['EXISTENCIA'].fillna(0)
+                if 'DESCR_INV' in resumen.columns and 'DESCR' in resumen.columns:
+                    resumen['DESCR'] = resumen['DESCR'].combine_first(resumen['DESCR_INV']).fillna('')
+                elif 'DESCR_INV' in resumen.columns:
+                    resumen['DESCR'] = resumen['DESCR_INV'].fillna('')
+                resumen = resumen[(resumen['VENTA'] != 0) | (resumen['HITS'] > 0) | (resumen['EXISTENCIA'] != 0)].reset_index(drop=True)
+            else:
+                resumen = pd.DataFrame(columns=['NP', 'DESCR', 'VENTA', 'HITS', 'EXISTENCIA'])
+            
+            # --- CÁLCULO ACTIVO EN PANDAS ---
+            if not resumen.empty:
+                resumen['DEMANDA_VAL'] = resumen['HITS'].apply(lambda x: 'ALTA' if x > 12 else ('MEDIA' if x >= 6 else 'BAJA'))
+                resumen['PROM_VAL'] = resumen['VENTA'] / 12.0
+                resumen['BAJA_VAL'] = resumen['PROM_VAL'] * 0.5
+                resumen['MEDIA_VAL'] = resumen['PROM_VAL'] * 1.0
+                resumen['ALTA_VAL'] = resumen['PROM_VAL'] * 1.5
+                resumen['VTACT_VAL'] = resumen.apply(lambda r: r['EXISTENCIA'] / r['PROM_VAL'] if r['PROM_VAL'] > 0 else 0, axis=1)
                 
-                if buffer_resultado:
-                    st.success("✅ Archivo Cuautitlán Rafa generado exitosamente.")
-                    st.download_button(
-                        label="📥 Descargar Excel Final",
-                        data=buffer_resultado,
-                        file_name=f"Reporte_Cuautitlan_Rafa_{datetime.datetime.now().strftime('%d_%m_%Y')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+                def calc_exc(r):
+                    target = r['ALTA_VAL'] if r['DEMANDA_VAL'] == 'ALTA' else (r['MEDIA_VAL'] if r['DEMANDA_VAL'] == 'MEDIA' else r['BAJA_VAL'])
+                    return "SI" if r['EXISTENCIA'] > target else "NO"
+                resumen['EXC_VAL'] = resumen.apply(calc_exc, axis=1)
+                
+                def calc_trasp(r):
+                    target = r['ALTA_VAL'] if r['DEMANDA_VAL'] == 'ALTA' else (r['MEDIA_VAL'] if r['DEMANDA_VAL'] == 'MEDIA' else r['BAJA_VAL'])
+                    return target - r['EXISTENCIA']
+                resumen['TRASP_VAL'] = resumen.apply(calc_trasp, axis=1)
+            else:
+                resumen['DEMANDA_VAL'] = ''
+                resumen['PROM_VAL'] = 0
+                resumen['BAJA_VAL'] = 0
+                resumen['MEDIA_VAL'] = 0
+                resumen['ALTA_VAL'] = 0
+                resumen['VTACT_VAL'] = 0
+                resumen['EXC_VAL'] = "NO"
+                resumen['TRASP_VAL'] = 0
+
+            datos_almacenes[alm] = resumen
+            if not resumen.empty: todas_partes.append(resumen[['NP', 'DESCR']])
+
+        df_cons_base = pd.concat(todas_partes).drop_duplicates(subset=['NP']).reset_index(drop=True) if todas_partes else pd.DataFrame(columns=['NP', 'DESCR'])
+        
+        if df_inv is not None and not df_inv.empty:
+            inv_cuauti = df_inv[(df_inv['SUCURSAL'] == 'CUAUTITLAN') & (df_inv['ALMACEN'] == 'ALM. GENERAL')]
+            inv_cuauti_agg = inv_cuauti.groupby('NP')['EXISTENCIA'].sum().reset_index().rename(columns={'EXISTENCIA': 'INV_CUAUTI'})
+            inv_tulti = df_inv[(df_inv['SUCURSAL'] == 'TULTITLAN') & (df_inv['ALMACEN'] == 'ALM. GENERAL')]
+            inv_tulti_agg = inv_tulti.groupby('NP')['EXISTENCIA'].sum().reset_index().rename(columns={'EXISTENCIA': 'INV_TULTI'})
+            
+            df_cons_base = pd.merge(df_cons_base, inv_cuauti_agg, on='NP', how='left')
+            df_cons_base = pd.merge(df_cons_base, inv_tulti_agg, on='NP', how='left')
+            df_cons_base['INV_CUAUTI'] = df_cons_base['INV_CUAUTI'].fillna(0)
+            df_cons_base['INV_TULTI'] = df_cons_base['INV_TULTI'].fillna(0)
+        else:
+            df_cons_base['INV_CUAUTI'] = 0
+            df_cons_base['INV_TULTI'] = 0
+
+        ws_cons = workbook.add_worksheet("CONSIGNAS")
+        ws_cons.set_tab_color('#D3D3D3')
+        ws_cons.freeze_panes(2, 0)
+        
+        last_col_cons = 7 + len(TODOS_ALMACENES)
+        if not df_cons_base.empty:
+            ws_cons.autofilter(1, 0, len(df_cons_base) + 1, last_col_cons)
+
+        ws_cons.write(0, 0, "", fmt_blue)
+        ws_cons.write(0, 1, "", fmt_blue)
+        ws_cons.merge_range(0, 2, 0, 3, "TRASPASO REQUERIDO", fmt_blue)
+        ws_cons.merge_range(0, 4, 0, 5, "INV. DISPONIBLE", fmt_blue)
+        ws_cons.merge_range(0, 6, 0, 7, "COMPRA SUGERIDA", fmt_blue)
+        ws_cons.merge_range(0, 8, 0, last_col_cons, "DETALLE POR ALMACÉN", fmt_blue)
+
+        ws_cons.write(1, 0, "N° DE PARTE", fmt_blue)
+        ws_cons.write(1, 1, "DESCR", fmt_blue)
+        ws_cons.write(1, 2, "TRASPASO CUAUTITLAN", fmt_blue)
+        ws_cons.write(1, 3, "TRASPASO TULTITLAN", fmt_blue)
+        ws_cons.write(1, 4, "INV. CUAUTITLAN", fmt_blue)
+        ws_cons.write(1, 5, "INV. TULTITLAN", fmt_blue)
+        ws_cons.write(1, 6, "COMPRA SUG. CUAUTITLAN", fmt_blue)
+        ws_cons.write(1, 7, "COMPRA SUG. TULTITLAN", fmt_blue)
+
+        for i, alm in enumerate(TODOS_ALMACENES):
+            fmt_color_alm = fmt_header_cuauti if alm.upper() in [x.upper() for x in ALMACENES_CUAUTI] else fmt_header_tulti
+            ws_cons.write(1, 8 + i, alm, fmt_color_alm)
+
+        ws_cons.set_column('A:A', 20, cell_fmt_text)
+        ws_cons.set_column('B:B', 45, cell_fmt_text)
+        ws_cons.set_column('C:H', 18, cell_fmt)
+        ws_cons.set_column(8, last_col_cons, 16, cell_fmt)
+
+        for i in range(len(df_cons_base)):
+            row, ex_row = 2 + i, 3 + i
+            np_val = df_cons_base.loc[i, 'NP']
+            ws_cons.write(row, 0, np_val, cell_fmt_text)
+            ws_cons.write(row, 1, df_cons_base.loc[i, 'DESCR'], cell_fmt_text)
+            
+            cols_cuauti = []
+            cols_tulti = []
+            val_trasp_cuauti = 0
+            val_trasp_tulti = 0
+            alm_trasp_vals = {}
+            
+            for idx_alm, alm in enumerate(TODOS_ALMACENES):
+                col_letter = xl_col_to_name(8 + idx_alm)
+                df_alm = datos_almacenes[alm]
+                match = df_alm[df_alm['NP'] == np_val]
+                trasp_val = match['TRASP_VAL'].values[0] if not match.empty else 0
+                alm_trasp_vals[alm] = trasp_val
+                
+                if alm.upper() in [x.upper() for x in ALMACENES_CUAUTI]:
+                    cols_cuauti.append(f"{col_letter}{ex_row}")
+                    val_trasp_cuauti += trasp_val
+                elif alm.upper() in [x.upper() for x in ALMACENES_TULTI]:
+                    cols_tulti.append(f"{col_letter}{ex_row}")
+                    val_trasp_tulti += trasp_val
+            
+            # Pasamos "value=" a write_formula para inyectar el valor real y que Python lo lea sin problemas
+            ws_cons.write_formula(row, 2, f"=SUM({','.join(cols_cuauti)})" if cols_cuauti else "0", cell_fmt, value=val_trasp_cuauti)
+            ws_cons.write_formula(row, 3, f"=SUM({','.join(cols_tulti)})" if cols_tulti else "0", cell_fmt, value=val_trasp_tulti)
+            
+            inv_c = df_cons_base.loc[i, 'INV_CUAUTI']
+            inv_t = df_cons_base.loc[i, 'INV_TULTI']
+            ws_cons.write(row, 4, inv_c, cell_fmt)
+            ws_cons.write(row, 5, inv_t, cell_fmt)
+            
+            compra_c = max(0, val_trasp_cuauti - inv_c)
+            compra_t = max(0, val_trasp_tulti - inv_t)
+            ws_cons.write_formula(row, 6, f"=MAX(0, C{ex_row}-E{ex_row})", cell_fmt, value=compra_c)
+            ws_cons.write_formula(row, 7, f"=MAX(0, D{ex_row}-F{ex_row})", cell_fmt, value=compra_t)
+            
+            for j, alm in enumerate(TODOS_ALMACENES):
+                sheet_name_alm = alm[:31]
+                formula = f"=SUMIF('{sheet_name_alm}'!A:A, $A{ex_row}, '{sheet_name_alm}'!M:M)"
+                ws_cons.write_formula(row, 8 + j, formula, cell_fmt, value=alm_trasp_vals[alm])
+
+        for alm in TODOS_ALMACENES:
+            df_hoja, sheet_name = datos_almacenes[alm], alm[:31]
+            ws = workbook.add_worksheet(sheet_name)
+            ws.set_tab_color(obtener_color_pestana(alm))
+            ws.freeze_panes(1, 0)
+            
+            encabezados = ['N° DE PARTE', 'DESCR', 'VENTA', 'HITS', 'DEMANDA', 'PROMEDIO (12)', 'BAJA (.5)', 'MEDIA (1)', 'ALTA (1.5)', 'INVENTARIO EXISTENCIA', 'VENTA ACTUAL', 'EXCESO INVENTARIO', 'TRASPASO REQUERIDO', 'COMENTARIOS']
+            for col_num, col_name in enumerate(encabezados):
+                fmt = fmt_blue if col_name in ['N° DE PARTE', 'DESCR', 'VENTA', 'HITS'] else (fmt_white if col_name == 'COMENTARIOS' else fmt_gray)
+                ws.write(0, col_num, col_name, fmt)
+            
+            ws.set_column('A:A', 20, cell_fmt_text)
+            ws.set_column('B:B', 45, cell_fmt_text)
+            ws.set_column('C:M', 15, cell_fmt)
+            ws.set_column('N:N', 30, cell_fmt_text)
+            
+            for i in range(len(df_hoja)):
+                row, ex_row = 1 + i, 2 + i
+                ws.write(row, 0, df_hoja.loc[i, 'NP'], cell_fmt_text)
+                ws.write(row, 1, df_hoja.loc[i, 'DESCR'], cell_fmt_text)
+                ws.write(row, 2, df_hoja.loc[i, 'VENTA'], cell_fmt)
+                ws.write(row, 3, df_hoja.loc[i, 'HITS'], cell_fmt)
+                
+                f_dem = f'=IF(D{ex_row}>12,"ALTA",IF(AND(D{ex_row}>=6,D{ex_row}<=12),"MEDIA","BAJA"))'
+                ws.write_formula(row, 4, f_dem, cell_fmt_text, value=df_hoja.loc[i, 'DEMANDA_VAL'])
+                
+                f_prom = f'=IFERROR(C{ex_row}/12, 0)'
+                ws.write_formula(row, 5, f_prom, cell_fmt, value=df_hoja.loc[i, 'PROM_VAL'])
+                
+                ws.write_formula(row, 6, f'=F{ex_row}*0.5', cell_fmt, value=df_hoja.loc[i, 'BAJA_VAL'])
+                ws.write_formula(row, 7, f'=F{ex_row}*1', cell_fmt, value=df_hoja.loc[i, 'MEDIA_VAL'])
+                ws.write_formula(row, 8, f'=F{ex_row}*1.5', cell_fmt, value=df_hoja.loc[i, 'ALTA_VAL'])
+                
+                ws.write(row, 9, df_hoja.loc[i, 'EXISTENCIA'], cell_fmt)
+                
+                f_vtact = f'=IFERROR(J{ex_row}/F{ex_row}, 0)'
+                ws.write_formula(row, 10, f_vtact, cell_fmt, value=df_hoja.loc[i, 'VTACT_VAL'])
+                
+                f_exc = f'=IF(J{ex_row}>IF(E{ex_row}="ALTA",I{ex_row},IF(E{ex_row}="MEDIA",H{ex_row},G{ex_row})),"SI","NO")'
+                ws.write_formula(row, 11, f_exc, cell_fmt_text, value=df_hoja.loc[i, 'EXC_VAL'])
+                
+                f_trasp = f'=IF(E{ex_row}="ALTA", I{ex_row}-J{ex_row}, IF(E{ex_row}="MEDIA", H{ex_row}-J{ex_row}, G{ex_row}-J{ex_row}))'
+                ws.write_formula(row, 12, f_trasp, cell_fmt, value=df_hoja.loc[i, 'TRASP_VAL'])
+                
+                ws.write(row, 13, '', cell_fmt_text)
+
+    buffer.seek(0)
+    return buffer
+
+def modulo_traspasos(drive_service, master_sales_id, inventory_folder_id, parent_folder_id):
+    st.title("💎 CRA INT: Modelo Traspasos")
+    st.markdown("Generación automatizada de inventarios y requerimientos globales.")
+    st.info("💡 Haz clic en el botón para generar el Reporte Segmentado Completo.")
+
+    if st.button("🚀 Generar Reporte de Consignas"):
+        with st.spinner("Descargando bases..."):
+            df_inv = cargar_inventario_maestro(drive_service, inventory_folder_id)
+            if df_inv is None:
+                st.error("Error al cargar inventario maestro.")
+                st.stop()
+                
+            df_ventas, f_inicio, f_fin = descargar_todas_las_ventas_12m(drive_service, master_sales_id)
+            if df_ventas is None:
+                st.error("No se encontraron registros de ventas.")
+                st.stop()
+                
+            st.success(f"✅ Periodo: **{f_inicio.strftime('%b %Y')} a { (f_fin - relativedelta(days=1)).strftime('%b %Y')}**")
+            
+            with st.spinner("Procesando segmentación por sucursal y lógica de traspasos..."):
+                buffer_excel = crear_excel_consignas(df_ventas, df_inv)
+                
+            with st.spinner("Subiendo a Drive..."):
+                fecha_str = datetime.datetime.now().strftime("%d_%m_%Y")
+                name_file = f"Analisis_Consignas_Segmentado_{fecha_str}.xlsx"
+                link = subir_excel_a_drive(drive_service, parent_folder_id, buffer_excel, name_file)
+                
+                if link:
+                    st.balloons()
+                    st.success(f"🎉 ¡Reporte Segmentado Creado!")
+                    st.markdown(f"### [📂 Abrir Reporte en Drive]({link})")
