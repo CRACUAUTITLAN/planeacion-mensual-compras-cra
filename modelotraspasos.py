@@ -3,9 +3,19 @@ import streamlit as st
 import pandas as pd
 import io
 import datetime
+import re
 from dateutil.relativedelta import relativedelta
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 from xlsxwriter.utility import xl_col_to_name
+
+# --- FUNCIONES DE NORMALIZACIÓN ---
+def normalizar_np(np_str):
+    np_str = str(np_str).upper().replace('.0', '').strip()
+    # Mapeo inteligente para unificar patrones donde los prefijos y sufijos de letras están invertidos (ej. 641201KN a KN641201)
+    match = re.match(r'^([0-9]+)([A-Z]+)$', np_str)
+    if match:
+        return match.group(2) + match.group(1)
+    return np_str
 
 # --- FUNCIONES DRIVE LOCALES AL MÓDULO ---
 def descargar_archivo_drive(drive_service, file_id):
@@ -67,7 +77,7 @@ def cargar_inventario_maestro(_drive_service, inventory_folder_id):
             df_inv.columns = df_inv.columns.str.upper().str.strip()
             
             if 'NP' in df_inv.columns and 'ALMACEN' in df_inv.columns:
-                df_inv['NP'] = df_inv['NP'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+                df_inv['NP'] = df_inv['NP'].apply(normalizar_np)
                 df_inv['ALMACEN'] = df_inv['ALMACEN'].astype(str).str.replace(r'\s+', ' ', regex=True).str.strip().str.upper()
                 if 'SUCURSAL' in df_inv.columns:
                     df_inv['SUCURSAL'] = df_inv['SUCURSAL'].astype(str).str.strip().str.upper()
@@ -106,6 +116,11 @@ def descargar_todas_las_ventas_12m(_drive_service, master_sales_id):
                 engine = 'xlrd' if 'xls' in file_meta['name'].lower() and 'xlsx' not in file_meta['name'].lower() else 'openpyxl'
                 df_temp = pd.read_excel(content, engine=engine)
                 df_temp.columns = df_temp.columns.str.upper().str.strip()
+                
+                # Prevenir KeyError garantizando que FECHA exista antes del filtrado general
+                if 'FECHA' not in df_temp.columns:
+                    continue
+                    
                 cols_utiles = [c for c in df_temp.columns if c in ['NP', 'DESCR', 'FECHA', 'ALMACEN', 'CANTIDAD']]
                 dfs.append(df_temp[cols_utiles])
             except Exception: pass
@@ -117,7 +132,7 @@ def descargar_todas_las_ventas_12m(_drive_service, master_sales_id):
     mask = (df_global['FECHA'] >= fecha_inicio) & (df_global['FECHA'] < fecha_fin)
     df_global = df_global[mask].copy()
     
-    df_global['NP'] = df_global['NP'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+    df_global['NP'] = df_global['NP'].apply(normalizar_np)
     df_global['ALMACEN'] = df_global['ALMACEN'].astype(str).str.replace(r'\s+', ' ', regex=True).str.strip().str.upper()
     df_global['CANTIDAD'] = pd.to_numeric(df_global['CANTIDAD'], errors='coerce').fillna(0)
     
@@ -136,6 +151,13 @@ def obtener_color_pestana(almacen):
 
 def crear_excel_consignas(df_ventas, df_inv):
     buffer = io.BytesIO()
+    
+    # Preparar el mes/año para agrupar ventas únicas por mes
+    if 'FECHA' in df_ventas.columns:
+        df_ventas['MES_ANIO'] = df_ventas['FECHA'].dt.to_period('M').astype(str)
+    else:
+        df_ventas['MES_ANIO'] = "Unknown"
+        
     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
         workbook = writer.book
         
@@ -155,10 +177,14 @@ def crear_excel_consignas(df_ventas, df_inv):
             df_v_alm = df_ventas[df_ventas['ALMACEN'] == alm.upper()]
             resumen_ventas = pd.DataFrame()
             if not df_v_alm.empty:
-                resumen_ventas = df_v_alm.groupby('NP').agg(DESCR=('DESCR', 'first'), VENTA=('CANTIDAD', 'sum'), total_ev=('CANTIDAD', 'count'), neg_ev=('CANTIDAD', lambda x: (x < 0).sum())).reset_index()
-                resumen_ventas['HITS'] = (resumen_ventas['total_ev'] - (resumen_ventas['neg_ev'] * 2)).clip(lower=0)
+                # Agrupamos VENTA Total y conteo de Meses Únicos
+                resumen_ventas = df_v_alm.groupby('NP').agg(
+                    DESCR=('DESCR', 'first'), 
+                    VENTA=('CANTIDAD', 'sum'),
+                    MESES_VENTA=('MES_ANIO', 'nunique')
+                ).reset_index()
             else:
-                resumen_ventas = pd.DataFrame(columns=['NP', 'DESCR', 'VENTA', 'HITS'])
+                resumen_ventas = pd.DataFrame(columns=['NP', 'DESCR', 'VENTA', 'MESES_VENTA'])
 
             inv_exist = pd.DataFrame()
             if df_inv is not None and not df_inv.empty:
@@ -173,15 +199,15 @@ def crear_excel_consignas(df_ventas, df_inv):
             if not resumen_ventas.empty or not inv_exist.empty:
                 resumen = pd.merge(resumen_ventas, inv_exist, on='NP', how='outer')
                 resumen['VENTA'] = resumen['VENTA'].fillna(0)
-                resumen['HITS'] = resumen['HITS'].fillna(0)
+                resumen['MESES_VENTA'] = resumen['MESES_VENTA'].fillna(0)
                 resumen['EXISTENCIA'] = resumen['EXISTENCIA'].fillna(0)
                 if 'DESCR_INV' in resumen.columns and 'DESCR' in resumen.columns:
                     resumen['DESCR'] = resumen['DESCR'].combine_first(resumen['DESCR_INV']).fillna('')
                 elif 'DESCR_INV' in resumen.columns:
                     resumen['DESCR'] = resumen['DESCR_INV'].fillna('')
-                resumen = resumen[(resumen['VENTA'] != 0) | (resumen['HITS'] > 0) | (resumen['EXISTENCIA'] != 0)].reset_index(drop=True)
+                resumen = resumen[(resumen['VENTA'] != 0) | (resumen['MESES_VENTA'] > 0) | (resumen['EXISTENCIA'] != 0)].reset_index(drop=True)
             else:
-                resumen = pd.DataFrame(columns=['NP', 'DESCR', 'VENTA', 'HITS', 'EXISTENCIA'])
+                resumen = pd.DataFrame(columns=['NP', 'DESCR', 'VENTA', 'MESES_VENTA', 'EXISTENCIA'])
             
             datos_almacenes[alm] = resumen
             if not resumen.empty: todas_partes.append(resumen[['NP', 'DESCR']])
@@ -262,6 +288,9 @@ def crear_excel_consignas(df_ventas, df_inv):
                 sheet_name_alm = alm[:31]
                 formula = f"=SUMIF('{sheet_name_alm}'!A:A, $A{ex_row}, '{sheet_name_alm}'!M:M)"
                 ws_cons.write_formula(row, 8 + j, formula, cell_fmt)
+        
+        # Proteger hoja maestra manteniendo activo el autofiltro
+        ws_cons.protect('', {'autofilter': True, 'sort': True})
 
         for alm in TODOS_ALMACENES:
             df_hoja, sheet_name = datos_almacenes[alm], alm[:31]
@@ -269,9 +298,10 @@ def crear_excel_consignas(df_ventas, df_inv):
             ws.set_tab_color(obtener_color_pestana(alm))
             ws.freeze_panes(1, 0)
             
-            encabezados = ['N° DE PARTE', 'DESCR', 'VENTA', 'HITS', 'DEMANDA', 'PROMEDIO (12)', 'BAJA (.5)', 'MEDIA (1)', 'ALTA (1.5)', 'INVENTARIO EXISTENCIA', 'VENTA ACTUAL', 'EXCESO INVENTARIO', 'TRASPASO REQUERIDO', 'COMENTARIOS']
+            # Se sustituye HITS por MESES VENTA y PROMEDIO (12) por PROMEDIO (NO CERO)
+            encabezados = ['N° DE PARTE', 'DESCR', 'VENTA', 'MESES VENTA', 'DEMANDA', 'PROMEDIO (NO CERO)', 'BAJA (.5)', 'MEDIA (1)', 'ALTA (1.5)', 'INVENTARIO EXISTENCIA', 'VENTA ACTUAL', 'EXCESO INVENTARIO', 'TRASPASO REQUERIDO', 'COMENTARIOS']
             for col_num, col_name in enumerate(encabezados):
-                fmt = fmt_blue if col_name in ['N° DE PARTE', 'DESCR', 'VENTA', 'HITS'] else (fmt_white if col_name == 'COMENTARIOS' else fmt_gray)
+                fmt = fmt_blue if col_name in ['N° DE PARTE', 'DESCR', 'VENTA', 'MESES VENTA'] else (fmt_white if col_name == 'COMENTARIOS' else fmt_gray)
                 ws.write(0, col_num, col_name, fmt)
             
             ws.set_column('A:A', 20, cell_fmt_text)
@@ -279,14 +309,20 @@ def crear_excel_consignas(df_ventas, df_inv):
             ws.set_column('C:M', 15, cell_fmt)
             ws.set_column('N:N', 30, cell_fmt_text)
             
+            if not df_hoja.empty:
+                ws.autofilter(0, 0, len(df_hoja), len(encabezados) - 1)
+            
             for i in range(len(df_hoja)):
                 row, ex_row = 1 + i, 2 + i
                 ws.write(row, 0, df_hoja.loc[i, 'NP'], cell_fmt_text)
                 ws.write(row, 1, df_hoja.loc[i, 'DESCR'], cell_fmt_text)
                 ws.write(row, 2, df_hoja.loc[i, 'VENTA'], cell_fmt)
-                ws.write(row, 3, df_hoja.loc[i, 'HITS'], cell_fmt)
-                ws.write_formula(row, 4, f'=IF(D{ex_row}>12,"ALTA",IF(AND(D{ex_row}>=6,D{ex_row}<=12),"MEDIA","BAJA"))', cell_fmt_text)
-                ws.write_formula(row, 5, f'=IFERROR(C{ex_row}/12, 0)', cell_fmt)
+                ws.write(row, 3, df_hoja.loc[i, 'MESES_VENTA'], cell_fmt)
+                # Clasificación inteligente basada en Meses de Venta (Columna D)
+                ws.write_formula(row, 4, f'=IF(D{ex_row}>=7,"ALTA",IF(AND(D{ex_row}>=4,D{ex_row}<=6),"MEDIA","BAJA"))', cell_fmt_text)
+                # Cálculo de Promedio enfocado en Meses Reales (Venta / Meses Venta)
+                ws.write_formula(row, 5, f'=IFERROR(C{ex_row}/D{ex_row}, 0)', cell_fmt)
+                # Multiplicadores para Stock Sugerido
                 ws.write_formula(row, 6, f'=F{ex_row}*0.5', cell_fmt)
                 ws.write_formula(row, 7, f'=F{ex_row}*1', cell_fmt)
                 ws.write_formula(row, 8, f'=F{ex_row}*1.5', cell_fmt)
@@ -295,6 +331,9 @@ def crear_excel_consignas(df_ventas, df_inv):
                 ws.write_formula(row, 11, f'=IF(J{ex_row}>IF(E{ex_row}="ALTA",I{ex_row},IF(E{ex_row}="MEDIA",H{ex_row},G{ex_row})),"SI","NO")', cell_fmt_text)
                 ws.write_formula(row, 12, f'=IF(E{ex_row}="ALTA", I{ex_row}-J{ex_row}, IF(E{ex_row}="MEDIA", H{ex_row}-J{ex_row}, G{ex_row}-J{ex_row}))', cell_fmt)
                 ws.write(row, 13, '', cell_fmt_text)
+                
+            # Proteger hoja asegurando el uso de filtros
+            ws.protect('', {'autofilter': True, 'sort': True})
 
     buffer.seek(0)
     return buffer
