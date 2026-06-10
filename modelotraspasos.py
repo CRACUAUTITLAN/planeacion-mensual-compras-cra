@@ -117,7 +117,7 @@ def descargar_todas_las_ventas_12m(_drive_service, master_sales_id):
     mask = (df_global['FECHA'] >= fecha_inicio) & (df_global['FECHA'] < fecha_fin)
     df_global = df_global[mask].copy()
     
-    # EXTRAEMOS EL MES Y AÑO PARA CONTAR LA RECURRENCIA (NUEVO)
+    # EXTRAEMOS EL MES Y AÑO PARA CONTAR LA RECURRENCIA
     df_global['MES_ANIO'] = df_global['FECHA'].dt.to_period('M')
     
     df_global['NP'] = df_global['NP'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
@@ -154,7 +154,7 @@ def crear_excel_consignas(df_ventas, df_inv):
         datos_almacenes = {}
         todas_partes = []
 
-        # --- PRECALCULAR DATOS Y APLICAR NUEVA LÓGICA DE MESES ---
+        # --- PRECALCULAR DATOS Y APLICAR NUEVA LÓGICA ---
         for alm in TODOS_ALMACENES:
             df_v_alm = df_ventas[df_ventas['ALMACEN'] == alm.upper()]
             resumen_ventas = pd.DataFrame()
@@ -162,7 +162,6 @@ def crear_excel_consignas(df_ventas, df_inv):
                 resumen_ventas = df_v_alm.groupby('NP').agg(DESCR=('DESCR', 'first'), VENTA=('CANTIDAD', 'sum'), total_ev=('CANTIDAD', 'count'), neg_ev=('CANTIDAD', lambda x: (x < 0).sum())).reset_index()
                 resumen_ventas['HITS'] = (resumen_ventas['total_ev'] - (resumen_ventas['neg_ev'] * 2)).clip(lower=0)
                 
-                # NUEVO: Contar en cuántos meses DISTINTOS hubo venta (Filtramos venta > 0 para ser precisos)
                 meses_df = df_v_alm[df_v_alm['CANTIDAD'] > 0].groupby('NP')['MES_ANIO'].nunique().reset_index()
                 meses_df.rename(columns={'MES_ANIO': 'MESES_VENTA'}, inplace=True)
                 resumen_ventas = pd.merge(resumen_ventas, meses_df, on='NP', how='left')
@@ -197,17 +196,17 @@ def crear_excel_consignas(df_ventas, df_inv):
             else:
                 resumen = pd.DataFrame(columns=['NP', 'DESCR', 'VENTA', 'HITS', 'MESES_VENTA', 'EXISTENCIA'])
             
-            # --- CÁLCULO ACTIVO EN PANDAS CON LA NUEVA REGLA MATEMÁTICA ---
+            # --- CÁLCULO ACTIVO EN PANDAS ---
             if not resumen.empty:
-                # Nueva Clasificación por Recurrencia
+                # Clasificación por Recurrencia
                 resumen['DEMANDA_VAL'] = resumen['MESES_VENTA'].apply(lambda x: 'ALTA' if x >= 7 else ('MEDIA' if x >= 4 else 'BAJA'))
                 
                 # Doble Promedio
                 resumen['PROM_LINEAL'] = resumen['VENTA'] / 12.0
                 resumen['PROM_NO_CERO'] = resumen.apply(lambda r: r['VENTA'] / r['MESES_VENTA'] if r['MESES_VENTA'] > 0 else 0, axis=1)
                 
-                # Factor de Inventario Objetivo según tipo de promedio
-                resumen['BAJA_VAL'] = resumen['PROM_NO_CERO'] * 0
+                # --- CAMBIO DE LÓGICA DE INVENTARIO OBJETIVO A 0 PARA BAJA ---
+                resumen['BAJA_VAL'] = resumen['PROM_NO_CERO'] * 0 
                 resumen['MEDIA_VAL'] = resumen['PROM_NO_CERO'] * 1.0
                 resumen['ALTA_VAL'] = resumen['PROM_LINEAL'] * 1.5
                 
@@ -324,21 +323,19 @@ def crear_excel_consignas(df_ventas, df_inv):
             ws_cons.write_formula(row, 6, f"=MAX(0, C{ex_row}-E{ex_row})", cell_fmt, value=compra_c)
             ws_cons.write_formula(row, 7, f"=MAX(0, D{ex_row}-F{ex_row})", cell_fmt, value=compra_t)
             
-            # --- ATENCIÓN AQUÍ: TRASPASO AHORA ES LA COLUMNA O (índice 14) ---
             for j, alm in enumerate(TODOS_ALMACENES):
                 sheet_name_alm = alm[:31]
-                formula = f"=SUMIF('{sheet_name_alm}'!A:A, $A{ex_row}, '{sheet_name_alm}'!O:O)"
+                formula = f"=SUMIF('{sheet_name_alm}'!A:A, $A{ex_row}, '{sheet_name_alm}'!M:M)"
                 ws_cons.write_formula(row, 8 + j, formula, cell_fmt, value=alm_trasp_vals[alm])
 
-        # --- ESCRITURA DE HOJAS INDIVIDUALES ---
         for alm in TODOS_ALMACENES:
             df_hoja, sheet_name = datos_almacenes[alm], alm[:31]
             ws = workbook.add_worksheet(sheet_name)
             ws.set_tab_color(obtener_color_pestana(alm))
             ws.freeze_panes(1, 0)
             
-            # NUEVOS ENCABEZADOS AGREGANDO "MESES VENTA" Y "PROM REAL"
-            encabezados = ['N° DE PARTE', 'DESCR', 'VENTA', 'HITS', 'MESES VENTA', 'DEMANDA', 'PROM (12)', 'PROM REAL', 'BAJA (.5)', 'MEDIA (1)', 'ALTA (1.5)', 'INVENTARIO EXISTENCIA', 'VENTA ACTUAL', 'EXCESO INVENTARIO', 'TRASPASO REQUERIDO', 'COMENTARIOS']
+            # --- CAMBIO DE ENCABEZADO A BAJA (0) ---
+            encabezados = ['N° DE PARTE', 'DESCR', 'VENTA', 'HITS', 'MESES VENTA', 'DEMANDA', 'PROM (12)', 'PROM REAL', 'BAJA (0)', 'MEDIA (1)', 'ALTA (1.5)', 'INVENTARIO EXISTENCIA', 'VENTA ACTUAL', 'EXCESO INVENTARIO', 'TRASPASO REQUERIDO', 'COMENTARIOS']
             for col_num, col_name in enumerate(encabezados):
                 fmt = fmt_blue if col_name in ['N° DE PARTE', 'DESCR', 'VENTA', 'HITS', 'MESES VENTA'] else (fmt_white if col_name == 'COMENTARIOS' else fmt_gray)
                 ws.write(0, col_num, col_name, fmt)
@@ -365,7 +362,8 @@ def crear_excel_consignas(df_ventas, df_inv):
                 f_prom_real = f'=IFERROR(C{ex_row}/E{ex_row}, 0)'
                 ws.write_formula(row, 7, f_prom_real, cell_fmt, value=df_hoja.loc[i, 'PROM_NO_CERO'])
                 
-                ws.write_formula(row, 8, f'=H{ex_row}*0.5', cell_fmt, value=df_hoja.loc[i, 'BAJA_VAL'])
+                # --- CAMBIO FÓRMULA DE EXCEL A MULTIPLICAR POR 0 ---
+                ws.write_formula(row, 8, f'=H{ex_row}*0', cell_fmt, value=df_hoja.loc[i, 'BAJA_VAL'])
                 ws.write_formula(row, 9, f'=H{ex_row}*1', cell_fmt, value=df_hoja.loc[i, 'MEDIA_VAL'])
                 ws.write_formula(row, 10, f'=G{ex_row}*1.5', cell_fmt, value=df_hoja.loc[i, 'ALTA_VAL'])
                 
