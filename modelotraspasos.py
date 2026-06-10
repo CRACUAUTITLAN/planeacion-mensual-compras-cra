@@ -205,7 +205,7 @@ def crear_excel_consignas(df_ventas, df_inv):
                 resumen['PROM_LINEAL'] = resumen['VENTA'] / 12.0
                 resumen['PROM_NO_CERO'] = resumen.apply(lambda r: r['VENTA'] / r['MESES_VENTA'] if r['MESES_VENTA'] > 0 else 0, axis=1)
                 
-                # --- CAMBIO DE LÓGICA DE INVENTARIO OBJETIVO A 0 PARA BAJA ---
+                # Factor de Inventario Objetivo según tipo de promedio
                 resumen['BAJA_VAL'] = resumen['PROM_NO_CERO'] * 0 
                 resumen['MEDIA_VAL'] = resumen['PROM_NO_CERO'] * 1.0
                 resumen['ALTA_VAL'] = resumen['PROM_LINEAL'] * 1.5
@@ -323,9 +323,10 @@ def crear_excel_consignas(df_ventas, df_inv):
             ws_cons.write_formula(row, 6, f"=MAX(0, C{ex_row}-E{ex_row})", cell_fmt, value=compra_c)
             ws_cons.write_formula(row, 7, f"=MAX(0, D{ex_row}-F{ex_row})", cell_fmt, value=compra_t)
             
+            # --- CORRECCIÓN AQUÍ: TRASPASO AHORA ES LA COLUMNA O (índice 14) ---
             for j, alm in enumerate(TODOS_ALMACENES):
                 sheet_name_alm = alm[:31]
-                formula = f"=SUMIF('{sheet_name_alm}'!A:A, $A{ex_row}, '{sheet_name_alm}'!M:M)"
+                formula = f"=SUMIF('{sheet_name_alm}'!A:A, $A{ex_row}, '{sheet_name_alm}'!O:O)"
                 ws_cons.write_formula(row, 8 + j, formula, cell_fmt, value=alm_trasp_vals[alm])
 
         for alm in TODOS_ALMACENES:
@@ -334,7 +335,6 @@ def crear_excel_consignas(df_ventas, df_inv):
             ws.set_tab_color(obtener_color_pestana(alm))
             ws.freeze_panes(1, 0)
             
-            # --- CAMBIO DE ENCABEZADO A BAJA (0) ---
             encabezados = ['N° DE PARTE', 'DESCR', 'VENTA', 'HITS', 'MESES VENTA', 'DEMANDA', 'PROM (12)', 'PROM REAL', 'BAJA (0)', 'MEDIA (1)', 'ALTA (1.5)', 'INVENTARIO EXISTENCIA', 'VENTA ACTUAL', 'EXCESO INVENTARIO', 'TRASPASO REQUERIDO', 'COMENTARIOS']
             for col_num, col_name in enumerate(encabezados):
                 fmt = fmt_blue if col_name in ['N° DE PARTE', 'DESCR', 'VENTA', 'HITS', 'MESES VENTA'] else (fmt_white if col_name == 'COMENTARIOS' else fmt_gray)
@@ -362,7 +362,6 @@ def crear_excel_consignas(df_ventas, df_inv):
                 f_prom_real = f'=IFERROR(C{ex_row}/E{ex_row}, 0)'
                 ws.write_formula(row, 7, f_prom_real, cell_fmt, value=df_hoja.loc[i, 'PROM_NO_CERO'])
                 
-                # --- CAMBIO FÓRMULA DE EXCEL A MULTIPLICAR POR 0 ---
                 ws.write_formula(row, 8, f'=H{ex_row}*0', cell_fmt, value=df_hoja.loc[i, 'BAJA_VAL'])
                 ws.write_formula(row, 9, f'=H{ex_row}*1', cell_fmt, value=df_hoja.loc[i, 'MEDIA_VAL'])
                 ws.write_formula(row, 10, f'=G{ex_row}*1.5', cell_fmt, value=df_hoja.loc[i, 'ALTA_VAL'])
