@@ -207,7 +207,7 @@ def crear_excel_consignas(df_ventas, df_inv):
                 resumen['PROM_NO_CERO'] = resumen.apply(lambda r: r['VENTA'] / r['MESES_VENTA'] if r['MESES_VENTA'] > 0 else 0, axis=1)
                 
                 # Factor de Inventario Objetivo según tipo de promedio
-                resumen['BAJA_VAL'] = resumen['PROM_NO_CERO'] * 0.5
+                resumen['BAJA_VAL'] = resumen['PROM_NO_CERO'] * 0
                 resumen['MEDIA_VAL'] = resumen['PROM_NO_CERO'] * 1.0
                 resumen['ALTA_VAL'] = resumen['PROM_LINEAL'] * 1.5
                 
