@@ -137,7 +137,10 @@ def obtener_color_pestana(almacen):
     if alm in [x.upper() for x in ALMACENES_TULTI]: return '#FF9999'
     return '#FFFFFF'
 
-def crear_excel_consignas(df_ventas, df_inv):
+def crear_excel_consignas(df_ventas, df_inv, fecha_fin):
+    # Calculamos la fecha límite para la regla de inactividad de 3 meses
+    fecha_limite = fecha_fin - relativedelta(months=3)
+
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
         workbook = writer.book
@@ -159,7 +162,13 @@ def crear_excel_consignas(df_ventas, df_inv):
             df_v_alm = df_ventas[df_ventas['ALMACEN'] == alm.upper()]
             resumen_ventas = pd.DataFrame()
             if not df_v_alm.empty:
-                resumen_ventas = df_v_alm.groupby('NP').agg(DESCR=('DESCR', 'first'), VENTA=('CANTIDAD', 'sum'), total_ev=('CANTIDAD', 'count'), neg_ev=('CANTIDAD', lambda x: (x < 0).sum())).reset_index()
+                resumen_ventas = df_v_alm.groupby('NP').agg(
+                    DESCR=('DESCR', 'first'), 
+                    VENTA=('CANTIDAD', 'sum'), 
+                    total_ev=('CANTIDAD', 'count'), 
+                    neg_ev=('CANTIDAD', lambda x: (x < 0).sum()),
+                    ULTIMA_VENTA=('FECHA', 'max') # Rastreando la fecha más reciente
+                ).reset_index()
                 resumen_ventas['HITS'] = (resumen_ventas['total_ev'] - (resumen_ventas['neg_ev'] * 2)).clip(lower=0)
                 
                 meses_df = df_v_alm[df_v_alm['CANTIDAD'] > 0].groupby('NP')['MES_ANIO'].nunique().reset_index()
@@ -167,7 +176,7 @@ def crear_excel_consignas(df_ventas, df_inv):
                 resumen_ventas = pd.merge(resumen_ventas, meses_df, on='NP', how='left')
                 resumen_ventas['MESES_VENTA'] = resumen_ventas['MESES_VENTA'].fillna(0)
             else:
-                resumen_ventas = pd.DataFrame(columns=['NP', 'DESCR', 'VENTA', 'HITS', 'MESES_VENTA'])
+                resumen_ventas = pd.DataFrame(columns=['NP', 'DESCR', 'VENTA', 'HITS', 'MESES_VENTA', 'ULTIMA_VENTA'])
 
             inv_exist = pd.DataFrame()
             if df_inv is not None and not df_inv.empty:
@@ -181,6 +190,11 @@ def crear_excel_consignas(df_ventas, df_inv):
 
             if not resumen_ventas.empty or not inv_exist.empty:
                 resumen = pd.merge(resumen_ventas, inv_exist, on='NP', how='outer')
+                
+                # Proteger columnas contra datos vacíos en el merge
+                if 'ULTIMA_VENTA' not in resumen.columns:
+                    resumen['ULTIMA_VENTA'] = pd.NaT
+                    
                 resumen['VENTA'] = resumen['VENTA'].fillna(0)
                 resumen['HITS'] = resumen['HITS'].fillna(0)
                 if 'MESES_VENTA' in resumen.columns:
@@ -194,18 +208,29 @@ def crear_excel_consignas(df_ventas, df_inv):
                     resumen['DESCR'] = resumen['DESCR_INV'].fillna('')
                 resumen = resumen[(resumen['VENTA'] != 0) | (resumen['HITS'] > 0) | (resumen['EXISTENCIA'] != 0)].reset_index(drop=True)
             else:
-                resumen = pd.DataFrame(columns=['NP', 'DESCR', 'VENTA', 'HITS', 'MESES_VENTA', 'EXISTENCIA'])
+                resumen = pd.DataFrame(columns=['NP', 'DESCR', 'VENTA', 'HITS', 'MESES_VENTA', 'EXISTENCIA', 'ULTIMA_VENTA'])
             
             # --- CÁLCULO ACTIVO EN PANDAS ---
             if not resumen.empty:
-                # Clasificación por Recurrencia
-                resumen['DEMANDA_VAL'] = resumen['MESES_VENTA'].apply(lambda x: 'ALTA' if x >= 7 else ('MEDIA' if x >= 4 else 'BAJA'))
+                # Regla Inteligente: Penalización a BAJA por Inactividad de 3 Meses
+                def calc_demanda(r):
+                    meses = r['MESES_VENTA']
+                    if meses >= 7:
+                        return 'ALTA'
+                    elif meses >= 4:
+                        if pd.notnull(r['ULTIMA_VENTA']) and r['ULTIMA_VENTA'] >= fecha_limite:
+                            return 'MEDIA'
+                        else:
+                            return 'BAJA' # Se penaliza a BAJA si no tiene venta reciente
+                    else:
+                        return 'BAJA'
+                
+                resumen['DEMANDA_VAL'] = resumen.apply(calc_demanda, axis=1)
                 
                 # Doble Promedio
                 resumen['PROM_LINEAL'] = resumen['VENTA'] / 12.0
                 resumen['PROM_NO_CERO'] = resumen.apply(lambda r: r['VENTA'] / r['MESES_VENTA'] if r['MESES_VENTA'] > 0 else 0, axis=1)
                 
-                # Factor de Inventario Objetivo según tipo de promedio
                 resumen['BAJA_VAL'] = resumen['PROM_NO_CERO'] * 0 
                 resumen['MEDIA_VAL'] = resumen['PROM_NO_CERO'] * 1.0
                 resumen['ALTA_VAL'] = resumen['PROM_LINEAL'] * 1.5
@@ -323,7 +348,6 @@ def crear_excel_consignas(df_ventas, df_inv):
             ws_cons.write_formula(row, 6, f"=MAX(0, C{ex_row}-E{ex_row})", cell_fmt, value=compra_c)
             ws_cons.write_formula(row, 7, f"=MAX(0, D{ex_row}-F{ex_row})", cell_fmt, value=compra_t)
             
-            # --- CORRECCIÓN AQUÍ: TRASPASO AHORA ES LA COLUMNA O (índice 14) ---
             for j, alm in enumerate(TODOS_ALMACENES):
                 sheet_name_alm = alm[:31]
                 formula = f"=SUMIF('{sheet_name_alm}'!A:A, $A{ex_row}, '{sheet_name_alm}'!O:O)"
@@ -353,8 +377,8 @@ def crear_excel_consignas(df_ventas, df_inv):
                 ws.write(row, 3, df_hoja.loc[i, 'HITS'], cell_fmt)
                 ws.write(row, 4, df_hoja.loc[i, 'MESES_VENTA'], cell_fmt)
                 
-                f_dem = f'=IF(E{ex_row}>=7,"ALTA",IF(AND(E{ex_row}>=4,E{ex_row}<=6),"MEDIA","BAJA"))'
-                ws.write_formula(row, 5, f_dem, cell_fmt_text, value=df_hoja.loc[i, 'DEMANDA_VAL'])
+                # Se plasma el resultado directo de Python como valor estático en vez de la fórmula
+                ws.write(row, 5, df_hoja.loc[i, 'DEMANDA_VAL'], cell_fmt_text)
                 
                 f_prom_12 = f'=IFERROR(C{ex_row}/12, 0)'
                 ws.write_formula(row, 6, f_prom_12, cell_fmt, value=df_hoja.loc[i, 'PROM_LINEAL'])
@@ -384,7 +408,7 @@ def crear_excel_consignas(df_ventas, df_inv):
 
 def modulo_traspasos(drive_service, master_sales_id, inventory_folder_id, parent_folder_id):
     st.title("💎 CRA INT: Modelo Traspasos (Demanda Real)")
-    st.markdown("Generación automatizada de inventarios bajo Método de Meses-Venta.")
+    st.markdown("Generación automatizada de inventarios bajo Método de Meses-Venta e Inactividad.")
     st.info("💡 Haz clic en el botón para generar el Reporte Segmentado Completo.")
 
     if st.button("🚀 Generar Reporte de Consignas"):
@@ -401,8 +425,8 @@ def modulo_traspasos(drive_service, master_sales_id, inventory_folder_id, parent
                 
             st.success(f"✅ Periodo: **{f_inicio.strftime('%b %Y')} a { (f_fin - relativedelta(days=1)).strftime('%b %Y')}**")
             
-            with st.spinner("Procesando segmentación por sucursal y nueva lógica matemática..."):
-                buffer_excel = crear_excel_consignas(df_ventas, df_inv)
+            with st.spinner("Procesando segmentación y castigos por inactividad de 3 meses..."):
+                buffer_excel = crear_excel_consignas(df_ventas, df_inv, f_fin)
                 
             with st.spinner("Subiendo a Drive..."):
                 fecha_str = datetime.datetime.now().strftime("%d_%m_%Y")
