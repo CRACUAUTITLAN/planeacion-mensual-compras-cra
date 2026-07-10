@@ -3,6 +3,7 @@ import streamlit as st
 import pandas as pd
 import io
 import datetime
+import gc  # <--- NUEVA LIBRERÍA PARA VACIAR LA MEMORIA RAM
 from dateutil.relativedelta import relativedelta
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 from xlsxwriter.utility import xl_col_to_name
@@ -64,6 +65,11 @@ def cargar_inventario_maestro(_drive_service, inventory_folder_id):
         if content:
             engine = 'xlrd' if 'xls' in target_file['name'].lower() and 'xlsx' not in target_file['name'].lower() else 'openpyxl'
             df_inv = pd.read_excel(content, engine=engine)
+            
+            # --- OPTIMIZACIÓN DE MEMORIA ---
+            content.close()
+            del content
+            
             df_inv.columns = df_inv.columns.str.upper().str.strip()
             
             if 'NP' in df_inv.columns and 'ALMACEN' in df_inv.columns:
@@ -73,6 +79,8 @@ def cargar_inventario_maestro(_drive_service, inventory_folder_id):
                     df_inv['SUCURSAL'] = df_inv['SUCURSAL'].astype(str).str.strip().str.upper()
                 if 'EXISTENCIA' in df_inv.columns:
                     df_inv['EXISTENCIA'] = pd.to_numeric(df_inv['EXISTENCIA'], errors='coerce').fillna(0)
+            
+            gc.collect() # Limpiar RAM
             return df_inv
         return None
     except Exception: return None
@@ -107,12 +115,27 @@ def descargar_todas_las_ventas_12m(_drive_service, master_sales_id):
                 df_temp = pd.read_excel(content, engine=engine)
                 df_temp.columns = df_temp.columns.str.upper().str.strip()
                 cols_utiles = [c for c in df_temp.columns if c in ['NP', 'DESCR', 'FECHA', 'ALMACEN', 'CANTIDAD']]
-                dfs.append(df_temp[cols_utiles])
+                
+                # --- OPTIMIZACIÓN DE MEMORIA: Solo guardar lo útil y destruir lo pesado ---
+                df_filtrado = df_temp[cols_utiles].copy()
+                dfs.append(df_filtrado)
+                del df_temp 
+                
             except Exception: pass
+            finally:
+                # Cerrar archivo de memoria y forzar recolección de basura
+                content.close()
+                del content
+                gc.collect() 
             
     if not dfs: return None, fecha_inicio, fecha_fin
     
     df_global = pd.concat(dfs, ignore_index=True)
+    
+    # --- OPTIMIZACIÓN DE MEMORIA ---
+    del dfs 
+    gc.collect()
+    
     df_global['FECHA'] = pd.to_datetime(df_global['FECHA'], dayfirst=True, errors='coerce')
     mask = (df_global['FECHA'] >= fecha_inicio) & (df_global['FECHA'] < fecha_fin)
     df_global = df_global[mask].copy()
