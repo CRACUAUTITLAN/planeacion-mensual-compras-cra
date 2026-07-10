@@ -3,7 +3,7 @@ import streamlit as st
 import pandas as pd
 import io
 import datetime
-import gc  # <--- NUEVA LIBRERÍA PARA VACIAR LA MEMORIA RAM
+import gc  # Librería para vaciar la memoria RAM
 from dateutil.relativedelta import relativedelta
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 from xlsxwriter.utility import xl_col_to_name
@@ -52,21 +52,40 @@ def subir_excel_a_drive(drive_service, parent_folder_id, buffer, nombre_archivo)
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def cargar_inventario_maestro(_drive_service, inventory_folder_id):
-    if not inventory_folder_id: return None
+    if not inventory_folder_id: 
+        st.error("El ID de la carpeta de inventario está vacío.")
+        return None
     try:
-        query = f"name contains 'INVENTARIO_CRA' and '{inventory_folder_id}' in parents and trashed=false"
-        results = _drive_service.files().list(q=query, fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
+        # Búsqueda flexible listando todos los archivos de la carpeta
+        query = f"'{inventory_folder_id}' in parents and trashed=false"
+        results = _drive_service.files().list(q=query, fields="files(id, name, mimeType)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
         files = results.get('files', [])
         
-        if not files: return None
+        if not files: 
+            st.error(f"La carpeta de inventario está vacía o la API no detecta archivos en ella.")
+            return None
 
-        target_file = files[0]
+        # Intentar localizar el archivo por nombre o tomar el primer Excel disponible
+        target_file = None
+        for f in files:
+            if 'INVENTARIO_CRA' in f['name'].upper():
+                target_file = f
+                break
+        
+        if not target_file:
+            for f in files:
+                if 'XLS' in f['name'].upper() or 'SPREADSHEET' in f.get('mimeType', '').upper():
+                    target_file = f
+                    break
+                    
+        if not target_file:
+            target_file = files[0]
+
         content = descargar_archivo_drive(_drive_service, target_file['id'])
         if content:
             engine = 'xlrd' if 'xls' in target_file['name'].lower() and 'xlsx' not in target_file['name'].lower() else 'openpyxl'
             df_inv = pd.read_excel(content, engine=engine)
             
-            # --- OPTIMIZACIÓN DE MEMORIA ---
             content.close()
             del content
             
@@ -80,10 +99,14 @@ def cargar_inventario_maestro(_drive_service, inventory_folder_id):
                 if 'EXISTENCIA' in df_inv.columns:
                     df_inv['EXISTENCIA'] = pd.to_numeric(df_inv['EXISTENCIA'], errors='coerce').fillna(0)
             
-            gc.collect() # Limpiar RAM
+            gc.collect()
             return df_inv
+        
+        st.error("No se pudo descargar el contenido del archivo de inventario.")
         return None
-    except Exception: return None
+    except Exception as e:
+        st.error(f"Error detallado al cargar inventario maestro: {e}")
+        return None
 
 def buscar_archivos_ventas(drive_service, master_sales_id, agencia, anios):
     archivos_encontrados = []
@@ -116,14 +139,12 @@ def descargar_todas_las_ventas_12m(_drive_service, master_sales_id):
                 df_temp.columns = df_temp.columns.str.upper().str.strip()
                 cols_utiles = [c for c in df_temp.columns if c in ['NP', 'DESCR', 'FECHA', 'ALMACEN', 'CANTIDAD']]
                 
-                # --- OPTIMIZACIÓN DE MEMORIA: Solo guardar lo útil y destruir lo pesado ---
                 df_filtrado = df_temp[cols_utiles].copy()
                 dfs.append(df_filtrado)
                 del df_temp 
                 
             except Exception: pass
             finally:
-                # Cerrar archivo de memoria y forzar recolección de basura
                 content.close()
                 del content
                 gc.collect() 
@@ -132,7 +153,6 @@ def descargar_todas_las_ventas_12m(_drive_service, master_sales_id):
     
     df_global = pd.concat(dfs, ignore_index=True)
     
-    # --- OPTIMIZACIÓN DE MEMORIA ---
     del dfs 
     gc.collect()
     
@@ -140,7 +160,6 @@ def descargar_todas_las_ventas_12m(_drive_service, master_sales_id):
     mask = (df_global['FECHA'] >= fecha_inicio) & (df_global['FECHA'] < fecha_fin)
     df_global = df_global[mask].copy()
     
-    # EXTRAEMOS EL MES Y AÑO PARA CONTAR LA RECURRENCIA
     df_global['MES_ANIO'] = df_global['FECHA'].dt.to_period('M')
     
     df_global['NP'] = df_global['NP'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
@@ -161,7 +180,6 @@ def obtener_color_pestana(almacen):
     return '#FFFFFF'
 
 def crear_excel_consignas(df_ventas, df_inv, fecha_fin):
-    # Calculamos la fecha límite para la regla de inactividad de 3 meses
     fecha_limite = fecha_fin - relativedelta(months=3)
 
     buffer = io.BytesIO()
@@ -180,7 +198,6 @@ def crear_excel_consignas(df_ventas, df_inv, fecha_fin):
         datos_almacenes = {}
         todas_partes = []
 
-        # --- PRECALCULAR DATOS Y APLICAR NUEVA LÓGICA ---
         for alm in TODOS_ALMACENES:
             df_v_alm = df_ventas[df_ventas['ALMACEN'] == alm.upper()]
             resumen_ventas = pd.DataFrame()
@@ -190,7 +207,7 @@ def crear_excel_consignas(df_ventas, df_inv, fecha_fin):
                     VENTA=('CANTIDAD', 'sum'), 
                     total_ev=('CANTIDAD', 'count'), 
                     neg_ev=('CANTIDAD', lambda x: (x < 0).sum()),
-                    ULTIMA_VENTA=('FECHA', 'max') # Rastreando la fecha más reciente
+                    ULTIMA_VENTA=('FECHA', 'max')
                 ).reset_index()
                 resumen_ventas['HITS'] = (resumen_ventas['total_ev'] - (resumen_ventas['neg_ev'] * 2)).clip(lower=0)
                 
@@ -214,7 +231,6 @@ def crear_excel_consignas(df_ventas, df_inv, fecha_fin):
             if not resumen_ventas.empty or not inv_exist.empty:
                 resumen = pd.merge(resumen_ventas, inv_exist, on='NP', how='outer')
                 
-                # Proteger columnas contra datos vacíos en el merge
                 if 'ULTIMA_VENTA' not in resumen.columns:
                     resumen['ULTIMA_VENTA'] = pd.NaT
                     
@@ -233,9 +249,7 @@ def crear_excel_consignas(df_ventas, df_inv, fecha_fin):
             else:
                 resumen = pd.DataFrame(columns=['NP', 'DESCR', 'VENTA', 'HITS', 'MESES_VENTA', 'EXISTENCIA', 'ULTIMA_VENTA'])
             
-            # --- CÁLCULO ACTIVO EN PANDAS ---
             if not resumen.empty:
-                # Regla Inteligente: Penalización a BAJA por Inactividad de 3 Meses
                 def calc_demanda(r):
                     meses = r['MESES_VENTA']
                     if meses >= 7:
@@ -244,13 +258,12 @@ def crear_excel_consignas(df_ventas, df_inv, fecha_fin):
                         if pd.notnull(r['ULTIMA_VENTA']) and r['ULTIMA_VENTA'] >= fecha_limite:
                             return 'MEDIA'
                         else:
-                            return 'BAJA' # Se penaliza a BAJA si no tiene venta reciente
+                            return 'BAJA' 
                     else:
                         return 'BAJA'
                 
                 resumen['DEMANDA_VAL'] = resumen.apply(calc_demanda, axis=1)
                 
-                # Doble Promedio
                 resumen['PROM_LINEAL'] = resumen['VENTA'] / 12.0
                 resumen['PROM_NO_CERO'] = resumen.apply(lambda r: r['VENTA'] / r['MESES_VENTA'] if r['MESES_VENTA'] > 0 else 0, axis=1)
                 
@@ -400,7 +413,6 @@ def crear_excel_consignas(df_ventas, df_inv, fecha_fin):
                 ws.write(row, 3, df_hoja.loc[i, 'HITS'], cell_fmt)
                 ws.write(row, 4, df_hoja.loc[i, 'MESES_VENTA'], cell_fmt)
                 
-                # Se plasma el resultado directo de Python como valor estático en vez de la fórmula
                 ws.write(row, 5, df_hoja.loc[i, 'DEMANDA_VAL'], cell_fmt_text)
                 
                 f_prom_12 = f'=IFERROR(C{ex_row}/12, 0)'
@@ -438,7 +450,6 @@ def modulo_traspasos(drive_service, master_sales_id, inventory_folder_id, parent
         with st.spinner("Descargando bases..."):
             df_inv = cargar_inventario_maestro(drive_service, inventory_folder_id)
             if df_inv is None:
-                st.error("Error al cargar inventario maestro.")
                 st.stop()
                 
             df_ventas, f_inicio, f_fin = descargar_todas_las_ventas_12m(drive_service, master_sales_id)
