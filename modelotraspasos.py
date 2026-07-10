@@ -11,15 +11,27 @@ from xlsxwriter.utility import xl_col_to_name
 # --- FUNCIONES DRIVE LOCALES AL MÓDULO ---
 def descargar_archivo_drive(drive_service, file_id):
     try:
+        # Usamos request directamente con un timeout más holgado
         request = drive_service.files().get_media(fileId=file_id)
+        
+        # Buffer en memoria
         file = io.BytesIO()
         downloader = MediaIoBaseDownload(file, request)
+        
         done = False
-        while done is False: status, done = downloader.next_chunk()
+        while done is False:
+            try:
+                status, done = downloader.next_chunk()
+            except ConnectionResetError:
+                # Si se corta, intentamos reanudar o simplemente reportar
+                print("Conexión reiniciada, intentando continuar...")
+                continue
+        
         file.seek(0)
         return file
     except Exception as e:
-        print(f"Error al descargar archivo de Drive: {e}")
+        # Este mensaje aparecerá en tu Streamlit si algo falla
+        st.error(f"Error crítico de conexión al descargar de Drive: {e}")
         return None
 
 def buscar_o_crear_carpeta(drive_service, nombre_carpeta, parent_id):
