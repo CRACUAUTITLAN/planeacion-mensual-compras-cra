@@ -281,7 +281,7 @@ def crear_excel_consignas(df_ventas, df_inv, fecha_fin):
                 
                 resumen['BAJA_VAL'] = resumen['PROM_NO_CERO'] * 0 
                 resumen['MEDIA_VAL'] = resumen['PROM_NO_CERO'] * 1.0
-                resumen['ALTA_VAL'] = resumen['PROM_LINEAL'] * 1.5
+                resumen['ALTA_VAL'] = resumen['PROM_NO_CERO'] * 1.5
                 
                 resumen['VTACT_VAL'] = resumen.apply(lambda r: r['EXISTENCIA'] / r['PROM_LINEAL'] if r['PROM_LINEAL'] > 0 else 0, axis=1)
                 
