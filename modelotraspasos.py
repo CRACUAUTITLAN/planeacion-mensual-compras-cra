@@ -435,7 +435,7 @@ def crear_excel_consignas(df_ventas, df_inv, fecha_fin):
                 
                 ws.write_formula(row, 8, f'=H{ex_row}*0', cell_fmt, value=df_hoja.loc[i, 'BAJA_VAL'])
                 ws.write_formula(row, 9, f'=H{ex_row}*1', cell_fmt, value=df_hoja.loc[i, 'MEDIA_VAL'])
-                ws.write_formula(row, 10, f'=G{ex_row}*1.5', cell_fmt, value=df_hoja.loc[i, 'ALTA_VAL'])
+                ws.write_formula(row, 10, f'=H{ex_row}*1.5', cell_fmt, value=df_hoja.loc[i, 'ALTA_VAL'])
                 
                 ws.write(row, 11, df_hoja.loc[i, 'EXISTENCIA'], cell_fmt)
                 
