@@ -8,13 +8,51 @@ from dateutil.relativedelta import relativedelta
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 from xlsxwriter.utility import xl_col_to_name
 
+# --- LISTAS DE ALMACENES ---
+ALMACENES_CUAUTI = [
+    "ALM. BOÑAR",
+    "ALM. CONSIGNA TMS",
+    "ALM. FAST FOOD",
+    "ALM. LIPU",
+    "ALM. MYM",
+    "ALM. UTEP",
+    "ALM. UTEP SAN LUIS"
+]
+ALMACENES_TULTI = [
+    "ALM. ENLACES LOGISTICOS",
+    "ALMACEN AFN",
+    "BISONTE SLP",
+    "BISONTE TEPOTZOTLAN",
+    "CULVERT",
+    "TDR",
+    "TEISA",
+    "TUMSA",
+    "ZONTE"
+]
+TODOS_ALMACENES = sorted(ALMACENES_CUAUTI + ALMACENES_TULTI)
+
+# --- NORMALIZADOR DE NOMBRES DE ALMACÉN ---
+def normalizar_almacen(serie_almacen):
+    """Limpia espacios, puntos y homologa variantes de nombres de almacén."""
+    s = serie_almacen.astype(str).str.upper()
+    # Si hay punto pegado al texto (ej. "ALM.CONSIGNA"), asegura espacio después del punto
+    s = s.str.replace(r'\.\s*', '. ', regex=True)
+    # Quita espacios dobles o extremos
+    s = s.str.replace(r'\s+', ' ', regex=True).str.strip()
+    
+    # Mapeo de variantes comunes en el ERP hacia el nombre oficial
+    mapeo_variantes = {
+        "CONSIGNA TMS": "ALM. CONSIGNA TMS",
+        "ALM CONSIGNA TMS": "ALM. CONSIGNA TMS",
+        "ALMACEN CONSIGNA TMS": "ALM. CONSIGNA TMS",
+        "TMS": "ALM. CONSIGNA TMS"
+    }
+    return s.replace(mapeo_variantes)
+
 # --- FUNCIONES DRIVE LOCALES AL MÓDULO ---
 def descargar_archivo_drive(drive_service, file_id):
     try:
-        # Usamos request directamente con un timeout más holgado
         request = drive_service.files().get_media(fileId=file_id)
-        
-        # Buffer en memoria
         file = io.BytesIO()
         downloader = MediaIoBaseDownload(file, request)
         
@@ -23,14 +61,12 @@ def descargar_archivo_drive(drive_service, file_id):
             try:
                 status, done = downloader.next_chunk()
             except ConnectionResetError:
-                # Si se corta, intentamos reanudar o simplemente reportar
                 print("Conexión reiniciada, intentando continuar...")
                 continue
         
         file.seek(0)
         return file
     except Exception as e:
-        # Este mensaje aparecerá en tu Streamlit si algo falla
         st.error(f"Error crítico de conexión al descargar de Drive: {e}")
         return None
 
@@ -39,18 +75,24 @@ def buscar_o_crear_carpeta(drive_service, nombre_carpeta, parent_id):
         query = f"mimeType='application/vnd.google-apps.folder' and name='{nombre_carpeta}' and '{parent_id}' in parents and trashed=false"
         results = drive_service.files().list(q=query, fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
         files = results.get('files', [])
-        if files: return files[0]['id']
+        if files:
+            return files[0]['id']
         else:
             metadata = {'name': nombre_carpeta, 'mimeType': 'application/vnd.google-apps.folder', 'parents': [parent_id]}
             folder = drive_service.files().create(body=metadata, fields='id', supportsAllDrives=True).execute()
             return folder.get('id')
-    except Exception: return None
+    except Exception:
+        return None
 
 def subir_excel_a_drive(drive_service, parent_folder_id, buffer, nombre_archivo):
     try:
         fecha_hoy = datetime.datetime.now()
         anio = str(fecha_hoy.year)
-        meses_es = {1:"01_Enero", 2:"02_Febrero", 3:"03_Marzo", 4:"04_Abril", 5:"05_Mayo", 6:"06_Junio", 7:"07_Julio", 8:"08_Agosto", 9:"09_Septiembre", 10:"10_Octubre", 11:"11_Noviembre", 12:"12_Diciembre"}
+        meses_es = {
+            1: "01_Enero", 2: "02_Febrero", 3: "03_Marzo", 4: "04_Abril",
+            5: "05_Mayo", 6: "06_Junio", 7: "07_Julio", 8: "08_Agosto",
+            9: "09_Septiembre", 10: "10_Octubre", 11: "11_Noviembre", 12: "12_Diciembre"
+        }
         mes_carpeta = meses_es[fecha_hoy.month]
 
         id_anio = buscar_o_crear_carpeta(drive_service, anio, parent_folder_id)
@@ -60,7 +102,8 @@ def subir_excel_a_drive(drive_service, parent_folder_id, buffer, nombre_archivo)
         file_metadata = {'name': nombre_archivo, 'parents': [id_mes]}
         archivo = drive_service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink', supportsAllDrives=True).execute()
         return archivo.get('webViewLink')
-    except Exception: return None
+    except Exception:
+        return None
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def cargar_inventario_maestro(_drive_service, inventory_folder_id):
@@ -68,16 +111,14 @@ def cargar_inventario_maestro(_drive_service, inventory_folder_id):
         st.error("El ID de la carpeta de inventario está vacío.")
         return None
     try:
-        # Búsqueda flexible listando todos los archivos de la carpeta
         query = f"'{inventory_folder_id}' in parents and trashed=false"
         results = _drive_service.files().list(q=query, fields="files(id, name, mimeType)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
         files = results.get('files', [])
         
         if not files: 
-            st.error(f"La carpeta de inventario está vacía o la API no detecta archivos en ella.")
+            st.error("La carpeta de inventario está vacía o la API no detecta archivos en ella.")
             return None
 
-        # Intentar localizar el archivo por nombre o tomar el primer Excel disponible
         target_file = None
         for f in files:
             if 'INVENTARIO_CRA' in f['name'].upper():
@@ -104,8 +145,8 @@ def cargar_inventario_maestro(_drive_service, inventory_folder_id):
             df_inv.columns = df_inv.columns.str.upper().str.strip()
             
             if 'NP' in df_inv.columns and 'ALMACEN' in df_inv.columns:
-                df_inv['NP'] = df_inv['NP'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-                df_inv['ALMACEN'] = df_inv['ALMACEN'].astype(str).str.replace(r'\s+', ' ', regex=True).str.strip().str.upper()
+                df_inv['NP'] = df_inv['NP'].astype(str).str.replace(r'\.0\$', '', regex=True).str.strip()
+                df_inv['ALMACEN'] = normalizar_almacen(df_inv['ALMACEN'])
                 if 'SUCURSAL' in df_inv.columns:
                     df_inv['SUCURSAL'] = df_inv['SUCURSAL'].astype(str).str.strip().str.upper()
                 if 'EXISTENCIA' in df_inv.columns:
@@ -122,7 +163,8 @@ def cargar_inventario_maestro(_drive_service, inventory_folder_id):
 
 def buscar_archivos_ventas(drive_service, master_sales_id, agencia, anios):
     archivos_encontrados = []
-    if not master_sales_id: return []
+    if not master_sales_id:
+        return []
     for anio in anios:
         query = f"name contains '{agencia}' and name contains '{anio}' and name contains 'MASTER' and '{master_sales_id}' in parents and trashed=false"
         results = drive_service.files().list(q=query, fields="files(id, name)", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
@@ -154,17 +196,17 @@ def descargar_todas_las_ventas_12m(_drive_service, master_sales_id):
                 df_filtrado = df_temp[cols_utiles].copy()
                 dfs.append(df_filtrado)
                 del df_temp 
-                
-            except Exception: pass
+            except Exception:
+                pass
             finally:
                 content.close()
                 del content
                 gc.collect() 
             
-    if not dfs: return None, fecha_inicio, fecha_fin
+    if not dfs:
+        return None, fecha_inicio, fecha_fin
     
     df_global = pd.concat(dfs, ignore_index=True)
-    
     del dfs 
     gc.collect()
     
@@ -173,22 +215,18 @@ def descargar_todas_las_ventas_12m(_drive_service, master_sales_id):
     df_global = df_global[mask].copy()
     
     df_global['MES_ANIO'] = df_global['FECHA'].dt.to_period('M')
-    
-    df_global['NP'] = df_global['NP'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-    df_global['ALMACEN'] = df_global['ALMACEN'].astype(str).str.replace(r'\s+', ' ', regex=True).str.strip().str.upper()
+    df_global['NP'] = df_global['NP'].astype(str).str.replace(r'\.0\$', '', regex=True).str.strip()
+    df_global['ALMACEN'] = normalizar_almacen(df_global['ALMACEN'])
     df_global['CANTIDAD'] = pd.to_numeric(df_global['CANTIDAD'], errors='coerce').fillna(0)
     
     return df_global, fecha_inicio, fecha_fin
 
-# --- LISTAS DE ALMACENES ---
-ALMACENES_CUAUTI = ["ALM. BOÑAR", "ALM. CONSIGNA TMS", "ALM. FAST FOOD", "ALM. LIPU", "ALM. MYM", "ALM. UTEP", "ALM. UTEP SAN LUIS"]
-ALMACENES_TULTI = ["ALM. ENLACES LOGISTICOS", "ALMACEN AFN", "BISONTE SLP", "BISONTE TEPOTZOTLAN", "CULVERT", "TDR", "TEISA", "TUMSA", "ZONTE"]
-TODOS_ALMACENES = sorted(ALMACENES_CUAUTI + ALMACENES_TULTI)
-
 def obtener_color_pestana(almacen):
     alm = almacen.upper()
-    if alm in [x.upper() for x in ALMACENES_CUAUTI]: return '#4B8BBE'
-    if alm in [x.upper() for x in ALMACENES_TULTI]: return '#FF9999'
+    if alm in [x.upper() for x in ALMACENES_CUAUTI]:
+        return '#4B8BBE'
+    if alm in [x.upper() for x in ALMACENES_TULTI]:
+        return '#FF9999'
     return '#FFFFFF'
 
 def crear_excel_consignas(df_ventas, df_inv, fecha_fin):
@@ -306,7 +344,8 @@ def crear_excel_consignas(df_ventas, df_inv, fecha_fin):
                 resumen['TRASP_VAL'] = 0
 
             datos_almacenes[alm] = resumen
-            if not resumen.empty: todas_partes.append(resumen[['NP', 'DESCR']])
+            if not resumen.empty:
+                todas_partes.append(resumen[['NP', 'DESCR']])
 
         df_cons_base = pd.concat(todas_partes).drop_duplicates(subset=['NP']).reset_index(drop=True) if todas_partes else pd.DataFrame(columns=['NP', 'DESCR'])
         
@@ -398,7 +437,7 @@ def crear_excel_consignas(df_ventas, df_inv, fecha_fin):
             
             for j, alm in enumerate(TODOS_ALMACENES):
                 sheet_name_alm = alm[:31]
-                formula = f"=SUMIF('{sheet_name_alm}'!A:A, $A{ex_row}, '{sheet_name_alm}'!O:O)"
+                formula = f"=SUMIF('{sheet_name_alm}'!A:A, \$A{ex_row}, '{sheet_name_alm}'!O:O)"
                 ws_cons.write_formula(row, 8 + j, formula, cell_fmt, value=alm_trasp_vals[alm])
 
         for alm in TODOS_ALMACENES:
@@ -458,7 +497,16 @@ def modulo_traspasos(drive_service, master_sales_id, inventory_folder_id, parent
     st.markdown("Generación automatizada de inventarios bajo Método de Meses-Venta e Inactividad.")
     st.info("💡 Haz clic en el botón para generar el Reporte Segmentado Completo.")
 
-    if st.button("🚀 Generar Reporte de Consignas"):
+    col1, col2 = st.columns([2, 1])
+    with col2:
+        if st.button("🔄 Limpiar Caché de Drive"):
+            st.cache_data.clear()
+            st.success("Caché limpiado. Se descargarán los archivos más recientes.")
+
+    with col1:
+        generar = st.button("🚀 Generar Reporte de Consignas")
+
+    if generar:
         with st.spinner("Descargando bases..."):
             df_inv = cargar_inventario_maestro(drive_service, inventory_folder_id)
             if df_inv is None:
@@ -469,7 +517,18 @@ def modulo_traspasos(drive_service, master_sales_id, inventory_folder_id, parent
                 st.error("No se encontraron registros de ventas.")
                 st.stop()
                 
-            st.success(f"✅ Periodo: **{f_inicio.strftime('%b %Y')} a { (f_fin - relativedelta(days=1)).strftime('%b %Y')}**")
+            st.success(f"✅ Periodo: **{f_inicio.strftime('%b %Y')} a {(f_fin - relativedelta(days=1)).strftime('%b %Y')}**")
+
+            # --- DIAGNÓSTICO RÁPIDO PARA VERIFICAR CONSIGNA TMS ---
+            with st.expander("🔍 Ver diagnóstico de lectura (Consigna TMS)"):
+                inv_tms = len(df_inv[df_inv['ALMACEN'] == 'ALM. CONSIGNA TMS']) if 'ALMACEN' in df_inv.columns else 0
+                vta_tms = len(df_ventas[df_ventas['ALMACEN'] == 'ALM. CONSIGNA TMS']) if 'ALMACEN' in df_ventas.columns else 0
+                st.write(f"- **Registros en Inventario para `ALM. CONSIGNA TMS`:** {inv_tms}")
+                st.write(f"- **Registros en Ventas (12m cerrados) para `ALM. CONSIGNA TMS`:** {vta_tms}")
+                if inv_tms == 0 and vta_tms == 0:
+                    st.warning("⚠️ No se detectaron registros para ALM. CONSIGNA TMS. Revisa cómo viene escrito en tus archivos:")
+                    st.write("**Almacenes en Inventario:**", sorted(df_inv['ALMACEN'].dropna().unique().tolist()))
+                    st.write("**Almacenes en Ventas:**", sorted(df_ventas['ALMACEN'].dropna().unique().tolist()))
             
             with st.spinner("Procesando segmentación y castigos por inactividad de 3 meses..."):
                 buffer_excel = crear_excel_consignas(df_ventas, df_inv, f_fin)
@@ -481,5 +540,5 @@ def modulo_traspasos(drive_service, master_sales_id, inventory_folder_id, parent
                 
                 if link:
                     st.balloons()
-                    st.success(f"🎉 ¡Reporte Segmentado Creado!")
+                    st.success("🎉 ¡Reporte Segmentado Creado!")
                     st.markdown(f"### [📂 Abrir Reporte en Drive]({link})")
