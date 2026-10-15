@@ -35,12 +35,9 @@ TODOS_ALMACENES = sorted(ALMACENES_CUAUTI + ALMACENES_TULTI)
 def normalizar_almacen(serie_almacen):
     """Limpia espacios, puntos y homologa variantes de nombres de almacén."""
     s = serie_almacen.astype(str).str.upper()
-    # Si hay punto pegado al texto (ej. "ALM.CONSIGNA"), asegura espacio después del punto
     s = s.str.replace(r'\.\s*', '. ', regex=True)
-    # Quita espacios dobles o extremos
     s = s.str.replace(r'\s+', ' ', regex=True).str.strip()
     
-    # Mapeo de variantes comunes en el ERP hacia el nombre oficial
     mapeo_variantes = {
         "CONSIGNA TMS": "ALM. CONSIGNA TMS",
         "ALM CONSIGNA TMS": "ALM. CONSIGNA TMS",
@@ -145,7 +142,7 @@ def cargar_inventario_maestro(_drive_service, inventory_folder_id):
             df_inv.columns = df_inv.columns.str.upper().str.strip()
             
             if 'NP' in df_inv.columns and 'ALMACEN' in df_inv.columns:
-                df_inv['NP'] = df_inv['NP'].astype(str).str.replace(r'\.0\$', '', regex=True).str.strip()
+                df_inv['NP'] = df_inv['NP'].astype(str).str.replace(r'\.0\Z', '', regex=True).str.strip()
                 df_inv['ALMACEN'] = normalizar_almacen(df_inv['ALMACEN'])
                 if 'SUCURSAL' in df_inv.columns:
                     df_inv['SUCURSAL'] = df_inv['SUCURSAL'].astype(str).str.strip().str.upper()
@@ -215,7 +212,7 @@ def descargar_todas_las_ventas_12m(_drive_service, master_sales_id):
     df_global = df_global[mask].copy()
     
     df_global['MES_ANIO'] = df_global['FECHA'].dt.to_period('M')
-    df_global['NP'] = df_global['NP'].astype(str).str.replace(r'\.0\$', '', regex=True).str.strip()
+    df_global['NP'] = df_global['NP'].astype(str).str.replace(r'\.0\Z', '', regex=True).str.strip()
     df_global['ALMACEN'] = normalizar_almacen(df_global['ALMACEN'])
     df_global['CANTIDAD'] = pd.to_numeric(df_global['CANTIDAD'], errors='coerce').fillna(0)
     
@@ -437,7 +434,8 @@ def crear_excel_consignas(df_ventas, df_inv, fecha_fin):
             
             for j, alm in enumerate(TODOS_ALMACENES):
                 sheet_name_alm = alm[:31]
-                formula = f"=SUMIF('{sheet_name_alm}'!A:A, \$A{ex_row}, '{sheet_name_alm}'!O:O)"
+                # Se usa A{ex_row} sin signo de pesos para evitar diagonales invertidas al copiar/pegar
+                formula = f"=SUMIF('{sheet_name_alm}'!A:A, A{ex_row}, '{sheet_name_alm}'!O:O)"
                 ws_cons.write_formula(row, 8 + j, formula, cell_fmt, value=alm_trasp_vals[alm])
 
         for alm in TODOS_ALMACENES:
@@ -518,17 +516,6 @@ def modulo_traspasos(drive_service, master_sales_id, inventory_folder_id, parent
                 st.stop()
                 
             st.success(f"✅ Periodo: **{f_inicio.strftime('%b %Y')} a {(f_fin - relativedelta(days=1)).strftime('%b %Y')}**")
-
-            # --- DIAGNÓSTICO RÁPIDO PARA VERIFICAR CONSIGNA TMS ---
-            with st.expander("🔍 Ver diagnóstico de lectura (Consigna TMS)"):
-                inv_tms = len(df_inv[df_inv['ALMACEN'] == 'ALM. CONSIGNA TMS']) if 'ALMACEN' in df_inv.columns else 0
-                vta_tms = len(df_ventas[df_ventas['ALMACEN'] == 'ALM. CONSIGNA TMS']) if 'ALMACEN' in df_ventas.columns else 0
-                st.write(f"- **Registros en Inventario para `ALM. CONSIGNA TMS`:** {inv_tms}")
-                st.write(f"- **Registros en Ventas (12m cerrados) para `ALM. CONSIGNA TMS`:** {vta_tms}")
-                if inv_tms == 0 and vta_tms == 0:
-                    st.warning("⚠️ No se detectaron registros para ALM. CONSIGNA TMS. Revisa cómo viene escrito en tus archivos:")
-                    st.write("**Almacenes en Inventario:**", sorted(df_inv['ALMACEN'].dropna().unique().tolist()))
-                    st.write("**Almacenes en Ventas:**", sorted(df_ventas['ALMACEN'].dropna().unique().tolist()))
             
             with st.spinner("Procesando segmentación y castigos por inactividad de 3 meses..."):
                 buffer_excel = crear_excel_consignas(df_ventas, df_inv, f_fin)
